@@ -2,19 +2,19 @@
 
 公开仓库：`oldbaby5566/ipbot-action`。业务源码分别保存在 `ipbot-server` 和 `ipbot-web`。生产架构为 `ipbot.net` 的 Cloudflare Pages 静态前端直接请求 `api.ipbot.net` 的 Docker API，两个组件分别发布。
 
-## 一次性生产配置
+## 生产环境 Secrets
 
-在本机修改 `scripts/setup-prod.sh` 顶部参数后执行 `bash scripts/setup-prod.sh`。需要 Python 3、SSH 和已登录且有仓库配置权限的 GitHub CLI `gh`；服务器沿用现有 Nginx、OpenSSL、Python 3、应用 `.env` 与 Cloudflare real-IP include。Token 可执行时隐藏输入，不必保存进脚本；账户 ID 可选，默认从 `ipbot.net` 所属账户自动读取。
+在 GitHub 仓库 Settings → Environments 中使用已有环境 `prod`，配置下方表格列出的必要 Secrets。Pages 项目、分支和 SSH 端口已有 workflow 默认值；Server 地址和 SSH 用户名通过 Secrets 配置，无需添加 GitHub Variables。
 
-脚本创建或复用 Direct Upload Pages 项目，准备 API 的 Origin CA 证书和独立 Nginx 配置，只更新服务器 `.env` 的 `ENV`、`APP_PUBLIC_URL`，配置 API DNS 代理与仅该主机的 Full (strict)，并自动写入 GitHub `one-ip-pages-prod` 的 Pages Secrets/Variables 和本地前端生产 API 地址。服务器改动有备份，Nginx 应用失败时恢复本次改动；现有数据库配置不被重写。脚本不构建或发布代码，也不重启 Docker，运行中容器读取新 `.env` 需要后续发布。
+在 [My Profile → API Tokens](https://dash.cloudflare.com/profile/api-tokens) 创建自定义 Cloudflare Token。只发布 Pages 时，授予 `Account / Cloudflare Pages / Edit` 即可，Account Resources 只选 Pages 所属账户。只有另行初始化 DNS、Origin CA 或主机 SSL 规则时，才按操作需要添加 `Zone / Zone / Read`、`Zone / DNS / Edit`、`Zone / SSL and Certificates / Edit`、`Zone / Config Rules / Edit`，Zone Resources 只选 `ipbot.net`，日常 Pages 发布不需要这些额外权限。Token 只显示一次，不应提交到仓库。
 
-Cloudflare 用户 Token：在 [My Profile → API Tokens](https://dash.cloudflare.com/profile/api-tokens) 创建自定义 Token，添加 `Account / Cloudflare Pages / Edit`、`Zone / Zone / Read`、`Zone / DNS / Edit`、`Zone / SSL and Certificates / Edit`、`Zone / Config Rules / Edit`；Account Resources 只选所属账户，Zone Resources 只选 `ipbot.net`。Token 只显示一次。账户 ID 可在域名 Overview 的 API 区域复制，也可用后台搜索 `Copy account ID`；不要混用 Zone ID。
-
-`SWITCH_FRONTEND_DNS=false` 默认保留主域 DNS，防止空 Pages 项目接管现网。Web/API 发布完成后设置为 `true` 再执行，脚本要求已有成功的 production Pages 部署，并确认 API 接受生产前端的凭证 CORS 后才将主域改为 Pages CNAME。私有 Token 不应提交到仓库。
+账户 ID 可在域名 Overview 的 API 区域复制，也可在 Cloudflare 后台搜索 `Copy account ID`；不要混用 Zone ID。正式切换主域 DNS 前，应先完成成功的 production Pages 部署，并确认新 API 接受生产前端的凭证 CORS。
 
 ## 发布入口
 
 在本仓库执行；backend/web 保留同名转发入口：
+
+发布、构建与 SSH 配置直接由 `Makefile` 和 `make/*.mk` 调用 Git、Cargo、pnpm、Docker、curl 等原生命令，不依赖额外的 `.sh` 脚本。GitHub workflow 的 Server 构建与 SSH 配置分别调用 `make build-server` 和 `make configure-ssh`。
 
 ```sh
 make deploy-server               # 仅 API Server；make deploy 同义
@@ -35,13 +35,14 @@ Action 仓库必须干净，且 HEAD 等于已发布的 `origin/main`。本地�
 
 | 位置 | 名称 | 用途 |
 | --- | --- | --- |
-| Repository secret | `GH_TOKEN` | checkout 所选的私有源码仓库；应有 `ipbot-server` / `ipbot-web` 的只读权限 |
-| Environment `one-ip-prod` secrets | `DEPLOY_HOST`、`DEPLOY_PORT`、`DEPLOY_USER` | Server SSH 主机、端口（空值默认 22）、用户 |
-| Environment `one-ip-prod` secrets | `DEPLOY_SSH_KEY`、`DEPLOY_KNOWN_HOSTS` | Server 部署私钥和已确认的 host key |
-| Environment `one-ip-pages-prod` secrets | `CLOUDFLARE_ACCOUNT_ID` | Pages 所在账户 ID，必须由操作者明确提供 |
-| Environment `one-ip-pages-prod` secrets | `CLOUDFLARE_API_TOKEN` | 指定账户的 `Account / Cloudflare Pages / Edit` token |
-| Environment `one-ip-pages-prod` variables | `CLOUDFLARE_PAGES_PROJECT` | 已有 Direct Upload 项目，默认 `ipbot` |
-| Environment `one-ip-pages-prod` variables | `CLOUDFLARE_PAGES_BRANCH` | 上传分支，默认 `main`；必须与项目的 production branch 一致 |
+| Environment `prod` secret（也可用 Repository secret） | `GH_TOKEN` | checkout 所选的私有源码仓库；应有 `ipbot-server` / `ipbot-web` 的只读权限 |
+| Environment `prod` secret | `DEPLOY_HOST` | 直连源站的服务器 IP 或域名，不使用 Cloudflare 代理地址 |
+| Environment `prod` secret | `DEPLOY_USER` | SSH 登录用户名 |
+| Environment `prod` secrets | `DEPLOY_SSH_KEY`、`DEPLOY_KNOWN_HOSTS` | Server 部署私钥和已确认的 host key |
+| Environment `prod` secret | `CLOUDFLARE_ACCOUNT_ID` | Pages 所在账户 ID，必须提供 |
+| Environment `prod` secret | `CLOUDFLARE_API_TOKEN` | 指定账户的 `Account / Cloudflare Pages / Edit` token |
+
+Web、Server 构建和 Server 部署统一使用 GitHub Environment `prod`。Pages 项目固定为 `ipbot`，生产分支固定为 `main`，无需配置 GitHub Variables。Server 地址和 SSH 用户名必须配置为 `prod` Secrets `DEPLOY_HOST`、`DEPLOY_USER`；SSH 端口默认 `22`。
 
 账户 ID 和 token 没有默认值；workflow 不查找或猜测账户，也不创建项目、修改 DNS、自定义域名或证书。先在正确账户建立 Direct Upload 项目并上传前端，准备 API 域名、TLS 与后端允许的前端 Origin；正式切换时协调 API 发布与 Pages 接管 `ipbot.net`。新 Server 不再托管旧主站，若需要过渡，可临时挂载现有 Web 目录并显式设置 `WEB_DIST_DIR`，切换完成后再使用 API-only Compose。前端生产构建使用 `VITE_API_BASE_URL=https://api.ipbot.net/api`。
 
@@ -88,11 +89,10 @@ make publish-server DEPLOY_HOST=your-ssh-alias DEPLOY_TRANSFER=registry \
 # 账户与 token 通过环境变量提供；只上传 Pages
 export CLOUDFLARE_ACCOUNT_ID=your-account-id
 export CLOUDFLARE_API_TOKEN=your-pages-edit-token
-make publish-web DEPLOY_VERSION=web-v2 \
-  CLOUDFLARE_PAGES_PROJECT=ipbot CLOUDFLARE_PAGES_BRANCH=main
+make publish-web DEPLOY_VERSION=web-v2
 ```
 
-`publish-web` 运行本地 Web build 后用 `pnpm dlx wrangler@4 pages deploy dist` 上传。需要先安装该 Web 的依赖；凭据只通过环境变量传递。`DRY_RUN=true` 只打印计划，不调用 pnpm、Wrangler、Docker 或 SSH，Pages dry-run 仍要求账户 ID、项目、分支和版本明确。
+`publish-web` 运行本地 Web build 后用 `pnpm dlx wrangler@4 pages deploy dist` 上传。需要先安装该 Web 的依赖；凭据只通过环境变量传递。`DRY_RUN=true` 只打印计划，不调用 pnpm、Wrangler、Docker 或 SSH，Pages dry-run 仍要求账户 ID 和版本，生产项目与分支使用默认值；Stage 参数仍须显式提供。
 
 Server 的 `DEPLOY_TRANSFER` 支持 `ssh`（默认，构建镜像并经 SSH 传输）、`registry`（拉取指定镜像）和 `release`（Action 使用）。镜像要求版本标签或 `@sha256:...`，拒绝 latest；`image-build` 仅接受标签。`DEPLOY_DIR` 默认 `/opt/one-ip`，`DEPLOY_PORT` 默认 `27528`，`DEPLOY_NAME` 默认 `one-ip`。release 模式还要求 `DEPLOY_RELEASE=deploy-server-<version>` 和可信的 `DEPLOY_CHECKSUM`。不覆盖远端 `.env` 或根目录旧 Compose。
 

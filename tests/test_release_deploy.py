@@ -68,13 +68,13 @@ if os.environ["FAIL_GATE"] == tool: sys.exit(23)
             (binaries / name).write_text(gate)
             (binaries / name).chmod(0o755)
         env = dict(os.environ, PATH=str(binaries) + os.pathsep + os.environ["PATH"],
-                   FIXTURE_BASE=str(base), TARGET=target, FAIL_GATE=fail,
-                   GH_TOKEN="fixture_token_not_a_credential", RELEASE_VERSION="1.2.3",
+                   FIXTURE_BASE=str(base), FAIL_GATE=fail,
+                   GH_TOKEN="fixture_token_not_a_credential", VERSION="1.2.3",
                    BACKEND_DIR=str(repos["backend"]),
                    WEB_DIR=str(repos["web"]), ACTION_DIR=str(repos["action"]),
                    DRY_RUN=str(dry_run).lower(), DISPATCH_STATUS=dispatch_status)
-        result = subprocess.run(["bash", str(ROOT / "scripts/release.sh")],
-                                cwd=repos["backend"], env=env, capture_output=True, text=True)
+        result = subprocess.run(["make", "--no-print-directory", f"deploy-{target}"],
+                                cwd=ROOT, env=env, capture_output=True, text=True)
         return repos, initial, result
 
     def test_server_checks_publish_only_backend_sha_then_dispatch(self):

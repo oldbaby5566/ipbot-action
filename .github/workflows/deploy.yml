@@ -16,6 +16,10 @@ name: One IP Deploy
 permissions:
   contents: read
 
+env:
+  PAGES_PROJECT: ipbot
+  PAGES_BRANCH: main
+
 concurrency:
   group: one-ip-${{ inputs.target }}-prod
   cancel-in-progress: false
@@ -50,7 +54,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment:
-      name: one-ip-pages-prod
+      name: prod
       url: https://ipbot.net
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -84,13 +88,11 @@ jobs:
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT || 'ipbot' }}
-          PAGES_BRANCH: ${{ vars.CLOUDFLARE_PAGES_BRANCH || 'main' }}
           WEB_SHA: ${{ inputs.web_ref }}
         run: |
           set -euo pipefail
-          : "${CLOUDFLARE_ACCOUNT_ID:?Set CLOUDFLARE_ACCOUNT_ID in one-ip-pages-prod}"
-          : "${CLOUDFLARE_API_TOKEN:?Set CLOUDFLARE_API_TOKEN in one-ip-pages-prod}"
+          : "${CLOUDFLARE_ACCOUNT_ID:?Set CLOUDFLARE_ACCOUNT_ID in prod}"
+          : "${CLOUDFLARE_API_TOKEN:?Set CLOUDFLARE_API_TOKEN in prod}"
           pnpm dlx wrangler@4 pages deploy dist --project-name "$PAGES_PROJECT" \
             --branch "$PAGES_BRANCH" --commit-hash "$WEB_SHA" --commit-dirty=true
 
@@ -99,6 +101,9 @@ jobs:
     if: inputs.target == 'server'
     runs-on: ubuntu-24.04
     timeout-minutes: 35
+    environment:
+      name: prod
+      url: https://api.ipbot.net
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -122,9 +127,10 @@ jobs:
             ipbot-server-amd64-${{ hashFiles('backend/Cargo.lock', 'backend/rust-toolchain.toml') }}-
             ipbot-server-amd64-
       - name: Build and package Server
+        working-directory: action
         env:
           VERSION: ${{ inputs.version }}
-        run: bash action/scripts/build-server.sh
+        run: make build-server
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: server
@@ -173,7 +179,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment:
-      name: one-ip-prod
+      name: prod
       url: https://api.ipbot.net
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -181,13 +187,14 @@ jobs:
           path: action
           persist-credentials: false
       - name: Configure SSH
+        working-directory: action
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: '22'
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
-        run: bash action/scripts/configure-ssh.sh
+        run: make configure-ssh
       - name: Download on server and deploy API
         working-directory: action
         env:
