@@ -2,6 +2,16 @@
 
 公开仓库：`oldbaby5566/ipbot-action`。业务源码分别保存在 `ipbot-server` 和 `ipbot-web`。生产架构为 `ipbot.net` 的 Cloudflare Pages 静态前端直接请求 `api.ipbot.net` 的 Docker API，两个组件分别发布。
 
+## 一次性生产配置
+
+在本机修改 `scripts/setup-prod.sh` 顶部参数后执行 `bash scripts/setup-prod.sh`。需要 Python 3、SSH 和已登录且有仓库配置权限的 GitHub CLI `gh`；服务器沿用现有 Nginx、OpenSSL、Python 3、应用 `.env` 与 Cloudflare real-IP include。Token 可执行时隐藏输入，不必保存进脚本；账户 ID 可选，默认从 `ipbot.net` 所属账户自动读取。
+
+脚本创建或复用 Direct Upload Pages 项目，准备 API 的 Origin CA 证书和独立 Nginx 配置，只更新服务器 `.env` 的 `ENV`、`APP_PUBLIC_URL`，配置 API DNS 代理与仅该主机的 Full (strict)，并自动写入 GitHub `one-ip-pages-prod` 的 Pages Secrets/Variables 和本地前端生产 API 地址。服务器改动有备份，Nginx 应用失败时恢复本次改动；现有数据库配置不被重写。脚本不构建或发布代码，也不重启 Docker，运行中容器读取新 `.env` 需要后续发布。
+
+Cloudflare 用户 Token：在 [My Profile → API Tokens](https://dash.cloudflare.com/profile/api-tokens) 创建自定义 Token，添加 `Account / Cloudflare Pages / Edit`、`Zone / Zone / Read`、`Zone / DNS / Edit`、`Zone / SSL and Certificates / Edit`、`Zone / Config Rules / Edit`；Account Resources 只选所属账户，Zone Resources 只选 `ipbot.net`。Token 只显示一次。账户 ID 可在域名 Overview 的 API 区域复制，也可用后台搜索 `Copy account ID`；不要混用 Zone ID。
+
+`SWITCH_FRONTEND_DNS=false` 默认保留主域 DNS，防止空 Pages 项目接管现网。Web/API 发布完成后设置为 `true` 再执行，脚本要求已有成功的 production Pages 部署，并确认 API 接受生产前端的凭证 CORS 后才将主域改为 Pages CNAME。私有 Token 不应提交到仓库。
+
 ## 发布入口
 
 在本仓库执行；backend/web 保留同名转发入口：
