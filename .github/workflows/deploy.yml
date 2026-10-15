@@ -201,9 +201,7 @@ jobs:
           VERSION: ${{ inputs.version }}
           CHECKSUM: ${{ needs.publish.outputs.checksum }}
         run: |
-          make publish-server DEPLOY_TRANSFER=release DEPLOY_HOST=ipbot \
-            DEPLOY_IMAGE="one-ip:$VERSION" DEPLOY_VERSION="$VERSION" \
-            DEPLOY_RELEASE="deploy-server-$VERSION" DEPLOY_CHECKSUM="$CHECKSUM"
+          make publish-server DEPLOY_VERSION="$VERSION" DEPLOY_CHECKSUM="$CHECKSUM"
       - name: Public API readiness check
         run: |
           set -uo pipefail

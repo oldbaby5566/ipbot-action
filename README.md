@@ -1,4 +1,4 @@
-# One IP Action
+# IPBot Action
 
 公开仓库：`oldbaby5566/ipbot-action`。业务源码分别保存在 `ipbot-server` 和 `ipbot-web`。生产架构为 `ipbot.net` 的 Cloudflare Pages 静态前端直接请求 `api.ipbot.net` 的 Docker API，两个组件分别发布。
 
@@ -21,6 +21,7 @@ make deploy-server               # 仅 API Server；make deploy 同义
 make deploy-web                  # 仅 Cloudflare Pages Web
 make deploy-server DRY_RUN=true  # 仓库预检与计划，不构建、不发布
 make deploy-web DRY_RUN=true
+make deploy-test                 # 本地部署契约测试，不连接服务器或 Docker
 ```
 
 `deploy-server` 只检查、升级、提交和推送 Backend，创建 `deploy-server-<version>` 源码标签，然后携带精确 Backend SHA 触发 `deploy.yml`。不读取、检查或升级 Web 仓库。
@@ -73,33 +74,16 @@ docker compose --project-directory "$PWD" --env-file .env \
 
 目录锁只由对应发布的 owner 释放；SSH 中断遗留锁时，先确认没有发布正在运行，再人工处理。首次从非托管容器迁移且没有旧 manifest 时，只能以当前 Compose 配置恢复旧镜像，不能恢复未纳入管理的旧配置。
 
-## 手动执行器
+## 已发布 Release 恢复
 
-以下命令直接执行发布，不进行源码提交或 workflow dispatch。源码目录默认 `BACKEND_DIR=../backend`、`WEB_DIR=../web`。
+正常发布统一使用 `deploy-server` 或 `deploy-web` 触发 GitHub Action。本地不再提供镜像构建、SSH 传镜像、registry 部署、Stage 部署或 `publish-web` 入口。
+
+`publish-server` 只部署已存在的公开 Release，必须同时提供版本和可信的 `checksums.txt` SHA256；它不提交源码、不构建镜像，也不触发 workflow。镜像 `one-ip:<version>` 和 Release 标签 `deploy-server-<version>` 由版本自动推导。
 
 ```sh
-# 本地只构建 API 镜像，不推送；按目标主机选择平台
-make image-build DEPLOY_IMAGE=registry.example/ipbot:v1 \
-  DEPLOY_VERSION=v1 DEPLOY_PLATFORM=linux/amd64
-
-# 已将镜像推送到自己的 registry 后，只更新 Server
-make publish-server DEPLOY_HOST=your-ssh-alias DEPLOY_TRANSFER=registry \
-  DEPLOY_IMAGE=registry.example/ipbot:v1 DEPLOY_VERSION=v1
-
-# 账户与 token 通过环境变量提供；只上传 Pages
-export CLOUDFLARE_ACCOUNT_ID=your-account-id
-export CLOUDFLARE_API_TOKEN=your-pages-edit-token
-make publish-web DEPLOY_VERSION=web-v2
+make publish-server DEPLOY_VERSION=<version> DEPLOY_CHECKSUM=<trusted-sha256>
 ```
 
-`publish-web` 运行本地 Web build 后用 `pnpm dlx wrangler@4 pages deploy dist` 上传。需要先安装该 Web 的依赖；凭据只通过环境变量传递。`DRY_RUN=true` 只打印计划，不调用 pnpm、Wrangler、Docker 或 SSH，Pages dry-run 仍要求账户 ID 和版本，生产项目与分支使用默认值；Stage 参数仍须显式提供。
+SSH 别名 `DEPLOY_HOST` 默认 `ipbot`，可覆盖为已配置的 SSH 主机；`DEPLOY_DIR` 默认 `/opt/one-ip`，HTTP 端口 `DEPLOY_PORT` 默认 `27528`，Compose 项目和容器名 `DEPLOY_NAME` 默认 `one-ip`。`DRY_RUN=true` 只打印计划，不连接服务器。执行器不覆盖远端 `.env` 或根目录旧 Compose，仍执行 Release 校验、部署锁、健康检查和失败回滚。
 
-Server 的 `DEPLOY_TRANSFER` 支持 `ssh`（默认，构建镜像并经 SSH 传输）、`registry`（拉取指定镜像）和 `release`（Action 使用）。镜像要求版本标签或 `@sha256:...`，拒绝 latest；`image-build` 仅接受标签。`DEPLOY_DIR` 默认 `/opt/one-ip`，`DEPLOY_PORT` 默认 `27528`，`DEPLOY_NAME` 默认 `one-ip`。release 模式还要求 `DEPLOY_RELEASE=deploy-server-<version>` 和可信的 `DEPLOY_CHECKSUM`。不覆盖远端 `.env` 或根目录旧 Compose。
-
-## Stage
-
-Server Stage 不继承生产主机、目录、镜像、版本、端口或构建平台。`deploy-stage` 必须显式提供 `DEPLOY_STAGE_HOST`、`DEPLOY_STAGE_DIR`、`DEPLOY_STAGE_IMAGE`、`DEPLOY_STAGE_VERSION` 和 `DEPLOY_STAGE_PORT`；`image-build-stage` 还要求 `DEPLOY_STAGE_PLATFORM`。项目／容器默认 `one-ip-stage`，远端目录使用独立 `.env`，ENV 为 stage。
-
-`deploy-stage-web` 不连接服务器，必须显式提供 `DEPLOY_STAGE_VERSION`、`CLOUDFLARE_STAGE_ACCOUNT_ID`、`CLOUDFLARE_STAGE_API_TOKEN`、`CLOUDFLARE_STAGE_PAGES_PROJECT` 和 `CLOUDFLARE_STAGE_PAGES_BRANCH` 和 `DEPLOY_STAGE_API_BASE_URL`。它使用 `build:stage`，通过 target-specific override 将 `DEPLOY_STAGE_API_BASE_URL` 导出为 `VITE_API_BASE_URL`，不会继承调用命令中的生产 API 地址。例如设置 `DEPLOY_STAGE_API_BASE_URL=https://your-stage-api.example/api`；该 API 的 `APP_PUBLIC_URL` 必须允许确切 Stage 前端 Origin。Pages preview 域名不会自动获得生产 Cookie 或调用生产 API 的授权。缺少 Stage 设置时直接失败，不回退生产账户或项目。
-
-若源码已推送而 dispatch 失败，可手动重试 `One IP Deploy`，只填写所选 target 的源码 SHA、版本和当前 Action SHA。Server Release 和远端版本目录不覆盖，重新构建使用新版本；Pages 的历史部署与回滚由对应 Pages 项目管理。
+若源码已推送而 dispatch 失败，可手动重试 `One IP Deploy`，填写所选 target 的源码 SHA、版本和当前 Action SHA。Server Release 和远端版本目录不覆盖，重新构建使用新版本；Pages 的历史部署与回滚由对应 Pages 项目管理。

@@ -13,12 +13,12 @@ class MakeEntryContracts(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             action = Path(directory) / "action fixture"
             action.mkdir()
-            targets = "deploy-server deploy-web deploy-stage deploy-stage-web deploy-test"
+            targets = "deploy-server deploy-web deploy-test"
             (action / "Makefile").write_text(
                 f".PHONY: {targets}\n{targets}:\n"
                 "\t@printf '%s\\n' '$@' '$(BACKEND_DIR)' '$(WEB_DIR)' '$(VERSION)' '$(DRY_RUN)' '$(PNPM)'\n")
             for source in ("backend", "web"):
-                for target in ("deploy", "deploy-server", "deploy-web", "deploy-stage", "deploy-test"):
+                for target in ("deploy", "deploy-server", "deploy-web", "deploy-test"):
                     with self.subTest(source=source, target=target):
                         result = subprocess.run([
                             "make", "--no-print-directory", target, f"ACTION_DIR={action}",
@@ -28,8 +28,6 @@ class MakeEntryContracts(unittest.TestCase):
                         expected = target
                         if target == "deploy":
                             expected = "deploy-server" if source == "backend" else "deploy-web"
-                        elif target == "deploy-stage" and source == "web":
-                            expected = "deploy-stage-web"
                         self.assertEqual(result.stdout.splitlines(), [
                             expected, str(ROOT.parent / "backend"), str(ROOT.parent / "web"),
                             "1.2.3", "true", "fixture-pnpm",
@@ -41,24 +39,12 @@ class MakeEntryContracts(unittest.TestCase):
             action.mkdir()
             shutil.copyfile(ROOT / "Makefile", action / "Makefile")
             shutil.copytree(ROOT / "make", action / "make")
-            for mode in ("server", "web"):
-                with self.subTest(mode=mode):
-                    options = ["DEPLOY_VERSION=v1", "DEPLOY_IMAGE=one-ip:v1"]
-                    if mode == "server":
-                        options += ["DEPLOY_TRANSFER=release", "DEPLOY_RELEASE=deploy-server-v1",
-                                    "DEPLOY_CHECKSUM=" + "a" * 64]
-                    else:
-                        options += ["CLOUDFLARE_ACCOUNT_ID=" + "a" * 32,
-                                    "CLOUDFLARE_PAGES_PROJECT=ipbot", "CLOUDFLARE_PAGES_BRANCH=main"]
-                    result = subprocess.run([
-                        "make", "--no-print-directory", f"publish-{mode}", "DRY_RUN=true", *options,
-                    ], cwd=action, text=True, capture_output=True)
-                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                    if mode == "server":
-                        self.assertIn("server downloads and verifies GitHub Release", result.stdout)
-                    else:
-                        self.assertIn("wrangler pages deploy dist", result.stdout)
-                        self.assertNotIn("[remote]", result.stdout)
+            result = subprocess.run([
+                "make", "--no-print-directory", "publish-server", "DRY_RUN=true",
+                "DEPLOY_VERSION=v1", "DEPLOY_CHECKSUM=" + "a" * 64,
+            ], cwd=action, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("server downloads and verifies GitHub Release deploy-server-v1", result.stdout)
             self.assertFalse((action.parent / "backend").exists())
             self.assertFalse((action.parent / "web").exists())
 
