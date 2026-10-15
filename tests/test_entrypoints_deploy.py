@@ -43,13 +43,22 @@ class MakeEntryContracts(unittest.TestCase):
             shutil.copytree(ROOT / "make", action / "make")
             for mode in ("server", "web"):
                 with self.subTest(mode=mode):
+                    options = ["DEPLOY_VERSION=v1", "DEPLOY_IMAGE=one-ip:v1"]
+                    if mode == "server":
+                        options += ["DEPLOY_TRANSFER=release", "DEPLOY_RELEASE=deploy-server-v1",
+                                    "DEPLOY_CHECKSUM=" + "a" * 64]
+                    else:
+                        options += ["CLOUDFLARE_ACCOUNT_ID=" + "a" * 32,
+                                    "CLOUDFLARE_PAGES_PROJECT=ipbot", "CLOUDFLARE_PAGES_BRANCH=main"]
                     result = subprocess.run([
-                        "make", "--no-print-directory", f"publish-{mode}", "DRY_RUN=true",
-                        "DEPLOY_TRANSFER=release", "DEPLOY_VERSION=v1", "DEPLOY_IMAGE=one-ip:v1",
-                        f"DEPLOY_RELEASE=deploy-{mode}-v1", "DEPLOY_CHECKSUM=" + "a" * 64,
+                        "make", "--no-print-directory", f"publish-{mode}", "DRY_RUN=true", *options,
                     ], cwd=action, text=True, capture_output=True)
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                    self.assertIn("server downloads and verifies GitHub Release", result.stdout)
+                    if mode == "server":
+                        self.assertIn("server downloads and verifies GitHub Release", result.stdout)
+                    else:
+                        self.assertIn("wrangler pages deploy dist", result.stdout)
+                        self.assertNotIn("[remote]", result.stdout)
             self.assertFalse((action.parent / "backend").exists())
             self.assertFalse((action.parent / "web").exists())
 

@@ -7,7 +7,7 @@ rust_version=$(sed -n 's/^channel = "\([0-9.]*\)"$/\1/p' backend/rust-toolchain.
 [[ "$rust_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
 mkdir -p .cache/cargo/registry .cache/cargo/git .cache/target .cache/fonts dist/image/fonts
 # Compile against Bookworm, matching the runtime's libc, with Cargo outputs cached
-# between releases. Server compilation does not wait for the Web build.
+# between releases. This job only reads and builds the backend repository.
 docker run --rm --platform linux/amd64 \
   -v "$PWD/backend:/src" -w /src \
   -v "$PWD/.cache/cargo/registry:/usr/local/cargo/registry" \

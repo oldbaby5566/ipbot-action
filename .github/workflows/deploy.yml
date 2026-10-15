@@ -4,20 +4,20 @@ name: One IP Deploy
   workflow_dispatch:
     inputs:
       target:
-        description: server = Server + Web; web = Web only
+        description: server = API Docker; web = Cloudflare Pages
         required: true
         type: choice
         options: [server, web]
       version: { required: true, type: string }
-      backend_ref: { description: Exact ipbot-server commit, required: true, type: string }
-      web_ref: { description: Exact ipbot-web commit, required: true, type: string }
+      backend_ref: { description: Exact ipbot-server commit (server only), required: false, type: string }
+      web_ref: { description: Exact ipbot-web commit (web only), required: false, type: string }
       expected_action_sha: { description: Exact ipbot-action commit, required: true, type: string }
 
 permissions:
   contents: read
 
 concurrency:
-  group: one-ip-prod
+  group: one-ip-${{ inputs.target }}-prod
   cancel-in-progress: false
 
 jobs:
@@ -37,14 +37,21 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$REPOSITORY" == oldbaby5566/ipbot-action && "$ACTION_SHA" == "$EXPECTED_ACTION_SHA" ]]
-          [[ "$TARGET" == server || "$TARGET" == web ]]
           [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
-          [[ "$BACKEND_SHA" =~ ^[0-9a-f]{40}$ && "$WEB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          case "$TARGET" in
+            server) [[ "$BACKEND_SHA" =~ ^[0-9a-f]{40}$ ]] ;;
+            web) [[ "$WEB_SHA" =~ ^[0-9a-f]{40}$ ]] ;;
+            *) exit 1 ;;
+          esac
 
   web:
     needs: prepare
+    if: inputs.target == 'web'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    environment:
+      name: one-ip-pages-prod
+      url: https://ipbot.net
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -61,7 +68,7 @@ jobs:
           node-version-file: web/.node-version
           cache: pnpm
           cache-dependency-path: web/pnpm-lock.yaml
-      - name: Build and package Web
+      - name: Build Web
         env:
           VERSION: ${{ inputs.version }}
         run: |
@@ -72,15 +79,20 @@ jobs:
           test -f web/dist/app-version.json
           test -z "$(find web/dist -type l -print -quit)"
           printf '%s\n' "$VERSION" > web/dist/one-web-revision.txt
-          mkdir dist
-          tar -czf dist/web.tar.gz -C web/dist .
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: web
-          path: dist/web.tar.gz
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 2
+      - name: Upload Web to Cloudflare Pages
+        working-directory: web
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT || 'ipbot' }}
+          PAGES_BRANCH: ${{ vars.CLOUDFLARE_PAGES_BRANCH || 'main' }}
+          WEB_SHA: ${{ inputs.web_ref }}
+        run: |
+          set -euo pipefail
+          : "${CLOUDFLARE_ACCOUNT_ID:?Set CLOUDFLARE_ACCOUNT_ID in one-ip-pages-prod}"
+          : "${CLOUDFLARE_API_TOKEN:?Set CLOUDFLARE_API_TOKEN in one-ip-pages-prod}"
+          pnpm dlx wrangler@4 pages deploy dist --project-name "$PAGES_PROJECT" \
+            --branch "$PAGES_BRANCH" --commit-hash "$WEB_SHA" --commit-dirty=true
 
   server:
     needs: prepare
@@ -124,8 +136,8 @@ jobs:
           retention-days: 2
 
   publish:
-    needs: [web, server]
-    if: ${{ !cancelled() && needs.web.result == 'success' && (needs.server.result == 'success' || needs.server.result == 'skipped') }}
+    needs: server
+    if: ${{ !cancelled() && needs.server.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -135,29 +147,25 @@ jobs:
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: '*'
+          name: server
           path: dist
-          merge-multiple: true
-      - name: Publish public release assets
+      - name: Publish public Server release assets
         id: release
         working-directory: dist
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           ACTION_SHA: ${{ github.sha }}
-          TARGET: ${{ inputs.target }}
           VERSION: ${{ inputs.version }}
           BACKEND_SHA: ${{ inputs.backend_ref }}
-          WEB_SHA: ${{ inputs.web_ref }}
         run: |
           set -euo pipefail
-          assets=(web.tar.gz)
-          if [ "$TARGET" = server ]; then assets+=(server-image.tar.gz docker-compose.yml); fi
+          assets=(server-image.tar.gz docker-compose.yml)
           sha256sum "${assets[@]}" > checksums.txt
           printf 'checksum=%s\n' "$(sha256sum checksums.txt | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
-          printf 'Server: %s\nWeb: %s\nAction: %s\n' "$BACKEND_SHA" "$WEB_SHA" "$ACTION_SHA" > release.txt
-          gh release create "deploy-$TARGET-$VERSION" "${assets[@]}" checksums.txt \
-            --target "$ACTION_SHA" --title "One IP $TARGET $VERSION" --notes-file release.txt --latest=false
+          printf 'Server: %s\nAction: %s\n' "$BACKEND_SHA" "$ACTION_SHA" > release.txt
+          gh release create "deploy-server-$VERSION" "${assets[@]}" checksums.txt \
+            --target "$ACTION_SHA" --title "One IP server $VERSION" --notes-file release.txt --latest=false
 
   deploy:
     needs: publish
@@ -166,7 +174,7 @@ jobs:
     timeout-minutes: 15
     environment:
       name: one-ip-prod
-      url: https://ipbot.net
+      url: https://api.ipbot.net
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -180,31 +188,30 @@ jobs:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
         run: bash action/scripts/configure-ssh.sh
-      - name: Download on server and deploy
+      - name: Download on server and deploy API
         working-directory: action
         env:
-          TARGET: ${{ inputs.target }}
           VERSION: ${{ inputs.version }}
           CHECKSUM: ${{ needs.publish.outputs.checksum }}
         run: |
-          make "publish-$TARGET" DEPLOY_TRANSFER=release DEPLOY_HOST=ipbot \
+          make publish-server DEPLOY_TRANSFER=release DEPLOY_HOST=ipbot \
             DEPLOY_IMAGE="one-ip:$VERSION" DEPLOY_VERSION="$VERSION" \
-            DEPLOY_RELEASE="deploy-$TARGET-$VERSION" DEPLOY_CHECKSUM="$CHECKSUM"
-      - name: Public health check
+            DEPLOY_RELEASE="deploy-server-$VERSION" DEPLOY_CHECKSUM="$CHECKSUM"
+      - name: Public API readiness check
         run: |
           set -uo pipefail
           for attempt in 1 2 3 4 5 6; do
-            echo "Public health check $attempt/6"
+            echo "Public API readiness check $attempt/6"
             status=$(curl --silent --max-time 10 --output /dev/null --dump-header headers.txt \
-              --write-out '%{http_code}' https://ipbot.net/readyz)
+              --write-out '%{http_code}' https://api.ipbot.net/readyz)
             [ "$status" = 200 ] && exit 0
             if [ "$status" = 403 ] && grep -qiE '^(cf-mitigated|server: cloudflare)' headers.txt; then
-              echo '::warning::Cloudflare refused the runner; origin health and Web revision passed over SSH.'
+              echo '::warning::Cloudflare refused the runner; origin readiness passed over SSH.'
               exit 0
             fi
             sleep 5
           done
-          echo "Public health check failed with HTTP $status" >&2
+          echo "Public API readiness check failed with HTTP $status" >&2
           exit 1
       - name: Remove SSH key
         if: always()

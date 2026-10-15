@@ -49,7 +49,7 @@ class ReleaseContracts(unittest.TestCase):
         binaries = base / "bin"
         binaries.mkdir()
         gate = '''#!/usr/bin/env python3
-import os, pathlib, sys, time
+import os, pathlib, sys
 base=pathlib.Path(os.environ["FIXTURE_BASE"])
 tool=pathlib.Path(sys.argv[0]).name
 args=sys.argv[1:]
@@ -62,15 +62,6 @@ if tool == "curl":
     sys.exit(0)
 gate=args[-1] if tool == "pnpm" else args[0]
 with (base/"gates.log").open("a") as out: out.write(tool+":"+gate+"\\n")
-marker="web" if tool == "pnpm" else "backend"
-if gate in ("install", "--frozen-lockfile", "fmt"):
-    (base/(marker+".started")).touch()
-    if os.environ["TARGET"] == "server":
-        other="backend" if marker == "web" else "web"
-        for _ in range(200):
-            if (base/(other+".started")).exists(): break
-            time.sleep(0.01)
-        else: sys.exit("Web and Backend did not start concurrently")
 if os.environ["FAIL_GATE"] == tool: sys.exit(23)
 '''
         for name in ("pnpm", "cargo", "curl"):
@@ -86,7 +77,7 @@ if os.environ["FAIL_GATE"] == tool: sys.exit(23)
                                 cwd=repos["backend"], env=env, capture_output=True, text=True)
         return repos, initial, result
 
-    def test_parallel_checks_publish_exact_source_shas_then_dispatch(self):
+    def test_server_checks_publish_only_backend_sha_then_dispatch(self):
         with tempfile.TemporaryDirectory() as directory:
             repos, initial, result = self.fixture(directory)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -95,20 +86,21 @@ if os.environ["FAIL_GATE"] == tool: sys.exit(23)
             self.assertEqual(payload["inputs"], dict(
                 target="server", version="1.2.3", expected_action_sha=initial["action"],
                 backend_ref=git(repos["backend"], "rev-parse", "HEAD"),
-                web_ref=git(repos["web"], "rev-parse", "HEAD")))
+                web_ref=""))
             for name in ("backend", "web"):
                 self.assertEqual(git(repos[name], "status", "--porcelain"), "")
                 self.assertEqual(git(repos[name], "rev-parse", "HEAD"), git(repos[name], "rev-parse", "origin/main"))
             self.assertIn('version = "1.2.3"', (repos["backend"] / "Cargo.lock").read_text())
             self.assertEqual(git(repos["backend"], "rev-parse", "deploy-server-1.2.3"), payload["inputs"]["backend_ref"])
-            self.assertEqual(git(repos["web"], "rev-parse", "v1.2.3"), payload["inputs"]["web_ref"])
+            self.assertEqual(git(repos["web"], "rev-parse", "HEAD"), initial["web"])
+            self.assertEqual(git(repos["web"], "tag"), "")
+            self.assertNotIn("pnpm:", (Path(directory) / "gates.log").read_text())
 
     def test_each_failed_check_blocks_versions_tags_and_dispatch(self):
-        for tool in ("pnpm", "cargo"):
-            with self.subTest(tool=tool), tempfile.TemporaryDirectory() as directory:
-                repos, initial, result = self.fixture(directory, fail=tool)
+        for target, tool in (("web", "pnpm"), ("server", "cargo")):
+            with self.subTest(target=target, tool=tool), tempfile.TemporaryDirectory() as directory:
+                repos, initial, result = self.fixture(directory, target=target, fail=tool)
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn("Release checks failed", result.stderr)
                 self.assertFalse((Path(directory) / "dispatch.json").exists())
                 for name in ("backend", "web"):
                     self.assertEqual(git(repos[name], "rev-parse", "HEAD"), initial[name])
@@ -121,7 +113,11 @@ if os.environ["FAIL_GATE"] == tool: sys.exit(23)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(git(repos["backend"], "rev-parse", "HEAD"), initial["backend"])
             self.assertNotIn("cargo:", (Path(directory) / "gates.log").read_text())
-            self.assertEqual(json.loads((Path(directory) / "dispatch.json").read_text())["inputs"]["target"], "web")
+            inputs = json.loads((Path(directory) / "dispatch.json").read_text())["inputs"]
+            self.assertEqual(inputs["target"], "web")
+            self.assertEqual(inputs["backend_ref"], "")
+            self.assertEqual(inputs["web_ref"], git(repos["web"], "rev-parse", "v1.2.3"))
+            self.assertEqual(git(repos["backend"], "tag"), "")
 
     def test_dry_run_has_no_checks_commits_or_dispatch(self):
         with tempfile.TemporaryDirectory() as directory:

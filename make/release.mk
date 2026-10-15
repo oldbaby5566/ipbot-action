@@ -1,8 +1,8 @@
 .PHONY: deploy deploy-server deploy-web
-deploy: deploy-server ## Release Server and Web through ipbot-action
-deploy-server: ## Check, bump, push and dispatch the Server + Web workflow
+deploy: deploy-server ## Release only Server through ipbot-action
+deploy-server: ## Check, bump, push and dispatch only the Server workflow
 	@$(call ip_release,server)
-deploy-web: ## Check, bump, push and dispatch the Web-only workflow
+deploy-web: ## Check, bump, push and dispatch Web to Cloudflare Pages
 	@$(call ip_release,web)
 
 define ip_release

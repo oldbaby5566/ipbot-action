@@ -8,7 +8,7 @@ WORKDIR /opt/one-ip
 COPY one-ip-backend /usr/local/bin/one-ip-backend
 COPY fonts ./fonts
 RUN install -d -o one-ip -g one-ip /opt/one-ip/data
-ENV ENV=prod BIND_ADDR=0.0.0.0:27528 WEB_DIST_DIR=/opt/one-ip/web/current DATA_DIR=/opt/one-ip/data
+ENV ENV=prod BIND_ADDR=0.0.0.0:27528 DATA_DIR=/opt/one-ip/data
 EXPOSE 27528 5353/udp 5353/tcp 3478/udp
 USER one-ip:one-ip
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \

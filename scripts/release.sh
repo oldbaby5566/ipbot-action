@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# `make deploy`: parallel checks → version commits/tags → dispatch ipbot-action.
+# Release one component: checks → its version commit/tag → dispatch ipbot-action.
 set -Eeuo pipefail
 
 target=${TARGET:-server}
@@ -7,8 +7,6 @@ version=${RELEASE_VERSION:-}
 action_dir=${ACTION_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}
 backend_dir=${BACKEND_DIR:-$action_dir/../backend}
 web_dir=${WEB_DIR:-$action_dir/../web}
-cd -- "$backend_dir"
-backend_dir=$(pwd)
 action_repository=oldbaby5566/ipbot-action
 pnpm=${PNPM:-pnpm}
 
@@ -20,8 +18,16 @@ case "$target" in server|web) ;; *) die 'TARGET must be server or web' ;; esac
 case "${DRY_RUN:-false}" in
   true) dry_run=true ;; false) dry_run=false ;; *) die 'DRY_RUN must be true or false' ;;
 esac
-web_tag="v$version"
 deploy_tag="deploy-$target-$version"
+if [[ "$target" == server ]]; then
+  cd -- "$backend_dir"
+  backend_dir=$(pwd)
+  source_dir=$backend_dir; source_label=Backend; source_tag=$deploy_tag
+else
+  cd -- "$web_dir"
+  web_dir=$(pwd)
+  source_dir=$web_dir; source_label=Web; source_tag="v$version"
+fi
 
 # Prints "<branch> <head>" for a clean repository that is not behind its origin branch.
 repository_state() {
@@ -45,22 +51,19 @@ require_new_tag() {
   fi
 }
 
-read -r backend_branch backend_head < <(repository_state Backend "$backend_dir")
-read -r web_branch web_head < <(repository_state Web "$web_dir")
+read -r source_branch source_head < <(repository_state "$source_label" "$source_dir")
 read -r action_branch action_head < <(repository_state Action "$action_dir")
 [[ "$action_branch" == main && "$action_head" == "$(git -C "$action_dir" rev-parse origin/main)" ]] ||
   die 'Action must exactly match published origin/main; commit and push ../action first'
-require_new_tag Backend "$backend_dir" "$deploy_tag"
-require_new_tag Web "$web_dir" "$web_tag"
+require_new_tag "$source_label" "$source_dir" "$source_tag"
 
 printf '%s\n' \
   "One IP release plan:" \
-  "  target:   $target ($([[ $target == server ]] && echo 'image + Web' || echo 'Web only'))" \
+  "  target:   $target" \
   "  version:  $version" \
-  "  backend:  $backend_branch@$backend_head" \
-  "  web:      $web_branch@$web_head" \
+  "  source:   $source_label $source_branch@$source_head" \
   "  action:   $action_repository@$action_head" \
-  "  trigger:  workflow_dispatch deploy.yml ($deploy_tag; Web tag $web_tag)"
+  "  trigger:  workflow_dispatch deploy.yml (source tag $source_tag)"
 if [[ "$dry_run" == true ]]; then
   echo 'DRY_RUN=true: no checks, version commits, pushes or tags.'
   exit 0
@@ -77,47 +80,26 @@ if [[ -z "$token" ]]; then
 fi
 [[ "$token" =~ ^[A-Za-z0-9_]{20,255}$ ]] || die 'Set GH_TOKEN with Actions write access to ipbot-action'
 
-echo '==> Checking Web and Backend concurrently'
-(
+echo "==> Checking $source_label"
+if [[ "$target" == server ]]; then
+  cargo fmt --all --check
+  cargo clippy --all-targets --locked -- -D warnings
+  cargo test --locked
+else
   "$pnpm" --dir "$web_dir" install --frozen-lockfile
   "$pnpm" --dir "$web_dir" typecheck
   "$pnpm" --dir "$web_dir" lint
   "$pnpm" --dir "$web_dir" test
   "$pnpm" --dir "$web_dir" build
-) &
-web_check=$!
-backend_check=
-if [[ "$target" == server ]]; then
-  (
-    cargo fmt --all --check
-    cargo clippy --all-targets --locked -- -D warnings
-    cargo test --locked
-  ) &
-  backend_check=$!
 fi
-checks_failed=0
-wait "$web_check" || checks_failed=1
-if [[ -n "$backend_check" ]]; then wait "$backend_check" || checks_failed=1; fi
-[[ "$checks_failed" == 0 ]] || die 'Release checks failed; nothing was committed or dispatched'
-
-for pair in "Backend:$backend_dir:$backend_head" "Web:$web_dir:$web_head"; do
-  IFS=: read -r label directory head <<<"$pair"
-  [[ "$(git -C "$directory" rev-parse HEAD)" == "$head" \
-    && -z "$(git -C "$directory" status --porcelain --untracked-files=all)" ]] ||
-    die "$label changed during checks; nothing was committed"
-done
+[[ "$(git -C "$source_dir" rev-parse HEAD)" == "$source_head" \
+  && -z "$(git -C "$source_dir" status --porcelain --untracked-files=all)" ]] ||
+  die "$source_label changed during checks; nothing was committed"
 [[ "$(git -C "$action_dir" rev-parse HEAD)" == "$action_head" \
   && -z "$(git -C "$action_dir" status --porcelain --untracked-files=all)" ]] ||
   die 'Action changed during checks; nothing was committed'
 
-echo "==> Bumping version to $version"
-VERSION="$version" node - "$web_dir/package.json" <<'NODE'
-const fs = require('node:fs');
-const file = process.argv[2];
-const pkg = JSON.parse(fs.readFileSync(file, 'utf8'));
-pkg.version = process.env.VERSION;
-fs.writeFileSync(file, `${JSON.stringify(pkg, null, 2)}\n`);
-NODE
+echo "==> Bumping $source_label version to $version"
 if [[ "$target" == server ]]; then
   for file in Cargo.toml Cargo.lock; do
     awk -v version="$version" -v lock="$([[ $file == Cargo.lock ]] && echo 1 || echo 0)" '
@@ -131,6 +113,14 @@ if [[ "$target" == server ]]; then
     ' "$file" >"$file.tmp" || { rm -f "$file.tmp"; die "Could not update version in $file"; }
     mv "$file.tmp" "$file"
   done
+else
+  VERSION="$version" node - "$web_dir/package.json" <<'NODE'
+const fs = require('node:fs');
+const file = process.argv[2];
+const pkg = JSON.parse(fs.readFileSync(file, 'utf8'));
+pkg.version = process.env.VERSION;
+fs.writeFileSync(file, `${JSON.stringify(pkg, null, 2)}\n`);
+NODE
 fi
 
 commit_release() {
@@ -139,21 +129,23 @@ commit_release() {
   git -C "$directory" diff --cached --quiet ||
     git -C "$directory" commit --quiet -m "chore(release): $version"
 }
-commit_release "$web_dir" package.json
-[[ "$target" != server ]] || commit_release "$backend_dir" Cargo.toml Cargo.lock
+if [[ "$target" == server ]]; then
+  commit_release "$backend_dir" Cargo.toml Cargo.lock
+else
+  commit_release "$web_dir" package.json
+fi
 
 echo '==> Publishing'
-git -C "$web_dir" tag "$web_tag"
-git -C "$web_dir" push origin "HEAD:refs/heads/$web_branch" "refs/tags/$web_tag"
-git -C "$backend_dir" tag "$deploy_tag"
-git -C "$backend_dir" push origin "HEAD:refs/heads/$backend_branch"
-git -C "$backend_dir" push origin "refs/tags/$deploy_tag"
+git -C "$source_dir" tag "$source_tag"
+git -C "$source_dir" push origin "HEAD:refs/heads/$source_branch" "refs/tags/$source_tag"
+backend_ref=; web_ref=
+if [[ "$target" == server ]]; then backend_ref=$(git -C "$backend_dir" rev-parse HEAD)
+else web_ref=$(git -C "$web_dir" rev-parse HEAD); fi
 
 payload_file=$(mktemp)
 response_file=$(mktemp)
 trap 'rm -f "$payload_file" "$response_file"' EXIT
-node - "$payload_file" "$target" "$version" "$(git -C "$backend_dir" rev-parse HEAD)" \
-  "$(git -C "$web_dir" rev-parse HEAD)" "$action_head" <<'NODE'
+node - "$payload_file" "$target" "$version" "$backend_ref" "$web_ref" "$action_head" <<'NODE'
 const fs = require('node:fs');
 const [file, target, version, backend_ref, web_ref, expected_action_sha] = process.argv.slice(2);
 fs.writeFileSync(file, JSON.stringify({ref: 'main', inputs: {target, version, backend_ref, web_ref, expected_action_sha}}));

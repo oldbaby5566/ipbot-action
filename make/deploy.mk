@@ -18,33 +18,70 @@ DEPLOY_STAGE_NAME ?= one-ip-stage
 DEPLOY_STAGE_PLATFORM ?=
 DEPLOY_STAGE_TRANSFER ?= registry
 DEPLOY_STAGE_SUDO ?= false
+DEPLOY_STAGE_API_BASE_URL ?=
 DRY_RUN ?= false
 IP_DEPLOY_ENV := prod
+CLOUDFLARE_ACCOUNT_ID ?=
+CLOUDFLARE_API_TOKEN ?=
+CLOUDFLARE_PAGES_PROJECT ?= ipbot
+CLOUDFLARE_PAGES_BRANCH ?= main
+CLOUDFLARE_STAGE_ACCOUNT_ID ?=
+CLOUDFLARE_STAGE_API_TOKEN ?=
+CLOUDFLARE_STAGE_PAGES_PROJECT ?=
+CLOUDFLARE_STAGE_PAGES_BRANCH ?=
 export DEPLOY_HOST DEPLOY_DIR DEPLOY_IMAGE DEPLOY_VERSION DEPLOY_PORT DEPLOY_NAME DEPLOY_PLATFORM DEPLOY_TRANSFER DEPLOY_RELEASE DEPLOY_CHECKSUM DEPLOY_SUDO DRY_RUN IP_DEPLOY_ENV
+export CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN CLOUDFLARE_PAGES_PROJECT CLOUDFLARE_PAGES_BRANCH
 
 .PHONY: image-build image-build-stage publish-server publish-web deploy-stage deploy-stage-web deploy-test
 image-build: ## Build a local release image without pushing
 	@set -eu; cd '$(BACKEND_DIR)'; $(call ip_settings,image); $(ip_image_build)
 
 # Executors run on the Action runner (or by hand) against DEPLOY_HOST.
-publish-server: ## Build or pull an image, deploy Server and Web with health checks and rollback
+publish-server: ## Build or pull an API-only image, deploy with health checks and rollback
 	@set -eu; if [ "$$DEPLOY_TRANSFER" != release ]; then cd '$(BACKEND_DIR)'; fi; $(call ip_settings,server); $(ip_publish)
-publish-web: ## Atomically deploy Web with health checks and rollback
-	@set -eu; if [ "$$DEPLOY_TRANSFER" != release ]; then cd '$(BACKEND_DIR)'; fi; $(call ip_settings,web); $(ip_publish)
+publish-web: ## Build Web and upload dist directly to Cloudflare Pages
+	@set -eu; \
+	case "$$DRY_RUN" in true|false) ;; *) echo 'DRY_RUN must be true or false' >&2; exit 1 ;; esac; \
+	version="$$DEPLOY_VERSION"; \
+	[ -n "$$version" ] || { echo 'Set DEPLOY_VERSION (DEPLOY_STAGE_VERSION for stage)' >&2; exit 1; }; \
+	[ -n "$$CLOUDFLARE_ACCOUNT_ID" ] || { echo 'Set CLOUDFLARE_ACCOUNT_ID (CLOUDFLARE_STAGE_ACCOUNT_ID for stage)' >&2; exit 1; }; \
+	[ -n "$$CLOUDFLARE_PAGES_PROJECT" ] && [ -n "$$CLOUDFLARE_PAGES_BRANCH" ] || { echo 'Set the Pages project and branch explicitly for stage' >&2; exit 1; }; \
+	build_script=build; \
+	if [ "$$IP_DEPLOY_ENV" = stage ]; then \
+	    [ -n "$${VITE_API_BASE_URL:-}" ] || { echo 'Set DEPLOY_STAGE_API_BASE_URL to the independent Stage API base URL' >&2; exit 1; }; \
+	    build_script=build:stage; \
+	fi; \
+	if [ "$$DRY_RUN" = true ]; then \
+	    printf '[plan] pnpm --dir %s %s; wrangler pages deploy dist --project-name %s --branch %s; api=%s (no SSH or Server update)\n' '$(abspath $(WEB_DIR))' "$$build_script" "$$CLOUDFLARE_PAGES_PROJECT" "$$CLOUDFLARE_PAGES_BRANCH" "$${VITE_API_BASE_URL:-Web mode configuration}"; \
+	else \
+	    [ -n "$$CLOUDFLARE_API_TOKEN" ] || { echo 'Set CLOUDFLARE_API_TOKEN (CLOUDFLARE_STAGE_API_TOKEN for stage)' >&2; exit 1; }; \
+	    cd '$(abspath $(WEB_DIR))'; '$(PNPM)' "$$build_script"; \
+	    test -f dist/index.html; test -f dist/app-version.json; \
+	    test -z "$$(find dist -type l -print -quit)" || { echo 'Web build must not contain symlinks' >&2; exit 1; }; \
+	    printf '%s\n' "$$version" >dist/one-web-revision.txt; \
+	    '$(PNPM)' dlx wrangler@4 pages deploy dist --project-name "$$CLOUDFLARE_PAGES_PROJECT" --branch "$$CLOUDFLARE_PAGES_BRANCH" --commit-hash "$$(git rev-parse HEAD)" --commit-dirty=true; \
+	fi
 
-image-build-stage deploy-stage deploy-stage-web: override DEPLOY_HOST = $(DEPLOY_STAGE_HOST)
-image-build-stage deploy-stage deploy-stage-web: override DEPLOY_DIR = $(DEPLOY_STAGE_DIR)
-image-build-stage deploy-stage deploy-stage-web: override DEPLOY_IMAGE = $(DEPLOY_STAGE_IMAGE)
-image-build-stage deploy-stage deploy-stage-web: override DEPLOY_VERSION = $(DEPLOY_STAGE_VERSION)
-image-build-stage deploy-stage deploy-stage-web: override DEPLOY_PORT = $(DEPLOY_STAGE_PORT)
-image-build-stage deploy-stage deploy-stage-web: override DEPLOY_NAME = $(DEPLOY_STAGE_NAME)
-image-build-stage deploy-stage deploy-stage-web: override DEPLOY_PLATFORM = $(DEPLOY_STAGE_PLATFORM)
-image-build-stage deploy-stage deploy-stage-web: override DEPLOY_TRANSFER = $(DEPLOY_STAGE_TRANSFER)
-image-build-stage deploy-stage deploy-stage-web: override DEPLOY_SUDO = $(DEPLOY_STAGE_SUDO)
+image-build-stage deploy-stage: override DEPLOY_HOST = $(DEPLOY_STAGE_HOST)
+image-build-stage deploy-stage: override DEPLOY_DIR = $(DEPLOY_STAGE_DIR)
+image-build-stage deploy-stage: override DEPLOY_IMAGE = $(DEPLOY_STAGE_IMAGE)
+image-build-stage deploy-stage: override DEPLOY_VERSION = $(DEPLOY_STAGE_VERSION)
+image-build-stage deploy-stage: override DEPLOY_PORT = $(DEPLOY_STAGE_PORT)
+image-build-stage deploy-stage: override DEPLOY_NAME = $(DEPLOY_STAGE_NAME)
+image-build-stage deploy-stage: override DEPLOY_PLATFORM = $(DEPLOY_STAGE_PLATFORM)
+image-build-stage deploy-stage: override DEPLOY_TRANSFER = $(DEPLOY_STAGE_TRANSFER)
+image-build-stage deploy-stage: override DEPLOY_SUDO = $(DEPLOY_STAGE_SUDO)
 image-build-stage deploy-stage deploy-stage-web: override IP_DEPLOY_ENV = stage
-image-build-stage: image-build ## Build a stage image from explicit stage settings
-deploy-stage: publish-server ## Deploy stage Server and Web from explicit stage settings
-deploy-stage-web: publish-web ## Deploy only stage Web from explicit stage settings
+deploy-stage-web: override DEPLOY_VERSION = $(DEPLOY_STAGE_VERSION)
+deploy-stage-web: override CLOUDFLARE_ACCOUNT_ID = $(CLOUDFLARE_STAGE_ACCOUNT_ID)
+deploy-stage-web: override CLOUDFLARE_API_TOKEN = $(CLOUDFLARE_STAGE_API_TOKEN)
+deploy-stage-web: override CLOUDFLARE_PAGES_PROJECT = $(CLOUDFLARE_STAGE_PAGES_PROJECT)
+deploy-stage-web: override CLOUDFLARE_PAGES_BRANCH = $(CLOUDFLARE_STAGE_PAGES_BRANCH)
+deploy-stage-web: override export VITE_API_BASE_URL = $(DEPLOY_STAGE_API_BASE_URL)
+image-build-stage: image-build ## Build a stage API-only image from explicit stage settings
+deploy-stage: publish-server ## Deploy only stage Server from explicit stage settings
+deploy-stage-web: publish-web ## Upload stage Web to an explicitly configured Pages project
+
 deploy-test: ## Run local deployment contracts without network or Docker
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*deploy.py'
 
@@ -52,28 +89,17 @@ deploy-test: ## Run local deployment contracts without network or Docker
 define IP_REMOTE_COMMON
 
 set -eu
-current="$$root/web/current"
-release="$$root/web/releases/$$version"
-previous=$$(readlink "$$current" 2>/dev/null || true)
-switched=0
-container=
 old_image=
 started=0
 deployment_switched=0
-switch_web() {
-    ln -s "$$1" "$$current.next"
-    mv -Tf "$$current.next" "$$current"
-}
 check_release() {
     for attempt in $$(seq 1 12); do
-        if curl -fsS --max-time 5 "http://127.0.0.1:$$port/readyz" >/dev/null \
-            && curl -fsS --max-time 5 "http://127.0.0.1:$$port/" >/dev/null \
-            && [ "$$(curl -fsS --max-time 5 -H 'Cache-Control: no-cache' "http://127.0.0.1:$$port/one-web-revision.txt")" = "$$version" ]; then
+        if curl -fsS --max-time 5 "http://127.0.0.1:$$port/readyz" >/dev/null; then
             return 0
         fi
         sleep 2
     done
-    echo 'Deployment health or Web revision check failed' >&2
+    echo 'Server readiness check failed' >&2
     return 1
 }
 
@@ -100,8 +126,6 @@ download_release() {
     for pid in $$pids; do wait "$$pid" || failed=1; done
     [ "$$failed" -eq 0 ]
     (cd "$$incoming" && sha256sum --check --strict checksums.txt)
-    mkdir "$$incoming/web"
-    tar -xzf "$$incoming/web.tar.gz" -C "$$incoming/web" --no-same-owner
 }
 endef
 
@@ -132,15 +156,6 @@ old_compose() {
 rollback() {
     code=$$?
     trap - EXIT
-    if [ "$$code" -ne 0 ] && [ "$$switched" -eq 1 ]; then
-        if [ -n "$$previous" ]; then
-            switch_web "$$previous" || echo 'Web rollback failed; manual recovery required' >&2
-        else
-            rm -f -- "$$current"
-        fi
-        echo 'Restored previous Web link' >&2
-    fi
-
     if [ "$$code" -ne 0 ] && [ "$$started" -eq 1 ]; then
         if [ -n "$$old_manifest" ]; then
             if [ -n "$$old_image" ]; then
@@ -163,23 +178,17 @@ rollback() {
             rm -f -- "$$root/deployments/current"
         fi
     fi
-    if [ -n "$$container" ]; then docker rm "$$container" >/dev/null || true; fi
     rm -f -- "$$root/deployments/current.next"
 
-    rm -f -- "$$current.next"
     rm -rf -- "$$incoming"
     release_lock
     exit "$$code"
 }
 trap rollback EXIT
-mkdir -p "$$root/web/releases"
-test ! -e "$$release"
-test ! -L "$$release"
-
 test -f "$$root/.env"
 test -d "$$root/data"
 if [ "$$transfer" = release ]; then
-    download_release web.tar.gz server-image.tar.gz docker-compose.yml
+    download_release server-image.tar.gz docker-compose.yml
     docker load --input "$$incoming/server-image.tar.gz"
 fi
 if [ "$$transfer" = ssh ] || [ "$$transfer" = release ]; then
@@ -189,13 +198,6 @@ else
     digest=$$(docker image inspect --format '{{index .RepoDigests 0}}' "$$image")
 fi
 test -n "$$digest"
-if [ "$$transfer" != release ]; then
-    mkdir "$$incoming/web"
-    container=$$(docker create "$$digest")
-    docker cp "$$container:/opt/one-ip/web-dist/." "$$incoming/web"
-    docker rm "$$container" >/dev/null
-    container=
-fi
 mkdir -p "$$root/deployments"
 mkdir "$$root/deployments/$$version"
 cp "$$incoming/docker-compose.yml" "$$manifest"
@@ -206,14 +208,6 @@ if [ -n "$$old_container" ]; then
     old_image=$$(docker inspect --format '{{.Image}}' "$$old_container")
 fi
 
-test -f "$$incoming/web/index.html"
-test -f "$$incoming/web/app-version.json"
-test "$$(cat "$$incoming/web/one-web-revision.txt")" = "$$version"
-chmod -R a+rX "$$incoming/web"
-mv -T "$$incoming/web" "$$release"
-switch_web "releases/$$version"
-switched=1
-
 started=1
 compose up -d --no-deps --pull never ip
 
@@ -223,58 +217,10 @@ ln -s "$$version" "$$root/deployments/current.next"
 mv -Tf "$$root/deployments/current.next" "$$root/deployments/current"
 deployment_switched=1
 
-echo 'Deployment completed; health and Web revision verified'
+echo 'Server deployment completed; readiness verified'
 endef
 
-define IP_REMOTE_WEB
-set -eu
-root=$$1; version=$$2; port=$$3; name=$$4; environment=$$5; image=$$6; incoming=$$7; transfer=$$8
-release_tag=$${9:-}; checksum=$${10:-}
-$(IP_REMOTE_COMMON)
-
-rollback() {
-    code=$$?
-    trap - EXIT
-    if [ "$$code" -ne 0 ] && [ "$$switched" -eq 1 ]; then
-        if [ -n "$$previous" ]; then
-            switch_web "$$previous" || echo 'Web rollback failed; manual recovery required' >&2
-        else
-            rm -f -- "$$current"
-        fi
-        echo 'Restored previous Web link' >&2
-    fi
-
-    rm -f -- "$$current.next"
-    rm -rf -- "$$incoming"
-    release_lock
-    exit "$$code"
-}
-trap rollback EXIT
-mkdir -p "$$root/web/releases"
-test ! -e "$$release"
-test ! -L "$$release"
-
-test -L "$$current"
-if [ "$$transfer" = release ]; then
-    download_release web.tar.gz
-else
-    tar -xf "$$incoming/web.tar" -C "$$incoming"
-fi
-
-test -f "$$incoming/web/index.html"
-test -f "$$incoming/web/app-version.json"
-test "$$(cat "$$incoming/web/one-web-revision.txt")" = "$$version"
-chmod -R a+rX "$$incoming/web"
-mv -T "$$incoming/web" "$$release"
-switch_web "releases/$$version"
-switched=1
-
-check_release
-
-echo 'Deployment completed; health and Web revision verified'
-endef
-
-export IP_REMOTE_SERVER IP_REMOTE_WEB
+export IP_REMOTE_SERVER
 
 define ip_settings
 set -eu; mode='$(1)'; \
@@ -287,7 +233,7 @@ if [ "$$mode" = server ] && [ "$$DEPLOY_TRANSFER" = ssh ]; then \
 fi; \
 [[ "$$version" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$$ ]] || { echo 'Set DEPLOY_VERSION (DEPLOY_STAGE_VERSION for stage) to a unique release label' >&2; exit 1; }; \
 if [ "$$DEPLOY_TRANSFER" = release ]; then \
-    [ "$$DEPLOY_RELEASE" = "deploy-$$mode-$$version" ] || { echo 'DEPLOY_RELEASE must match deploy-<server|web>-<version>' >&2; exit 1; }; \
+    [ "$$DEPLOY_RELEASE" = "deploy-$$mode-$$version" ] || { echo 'DEPLOY_RELEASE must match deploy-server-<version>' >&2; exit 1; }; \
     [[ "$$DEPLOY_CHECKSUM" =~ ^[a-f0-9]{64}$$ ]] || { echo 'DEPLOY_CHECKSUM must be the trusted SHA256 of checksums.txt' >&2; exit 1; }; \
 fi; \
 if [ "$$mode" != web ]; then \
@@ -305,22 +251,17 @@ if [ "$$mode" != image ]; then \
     [ "$$depth" -gt 0 ] || { echo 'DEPLOY_DIR must be non-root' >&2; exit 1; }; \
     [[ "$$DEPLOY_PORT" =~ ^[0-9]{1,5}$$ ]] && [ "$$DEPLOY_PORT" -ge 1 ] && [ "$$DEPLOY_PORT" -le 65535 ] || { echo 'DEPLOY_PORT must be a valid port' >&2; exit 1; }; \
     [[ "$$DEPLOY_NAME" =~ ^[a-z0-9][a-z0-9_-]{0,63}$$ ]] || { echo 'DEPLOY_NAME must be a Compose project name' >&2; exit 1; }; \
-fi; \
-build_script=build; [ "$$IP_DEPLOY_ENV" != stage ] || build_script=build:stage
+fi
 endef
 
 # Only public source/build files enter the temporary image context.
 define ip_image_build
 if [ "$$DRY_RUN" = true ]; then \
-    printf '[plan] pnpm --dir %s %s; stage Cargo/src/sql, stamped Web and verified fonts; docker build --platform %s --tag %s\n' '$(abspath $(WEB_DIR))' "$$build_script" "$$DEPLOY_PLATFORM" "$$image"; \
+    printf '[plan] stage Cargo/src/sql and verified fonts; docker build --platform %s --tag %s (API only)\n' "$$DEPLOY_PLATFORM" "$$image"; \
 else \
-    '$(PNPM)' --dir '$(abspath $(WEB_DIR))' "$$build_script"; \
     context="$$(mktemp -d)"; trap 'rm -rf "$$context"' EXIT; \
     cp Cargo.toml Cargo.lock rust-toolchain.toml "$$context/"; \
     cp -R src sql "$$context/"; cp deploy/docker/Dockerfile "$$context/Dockerfile"; \
-    test -f '$(abspath $(WEB_DIR))/dist/index.html'; test -f '$(abspath $(WEB_DIR))/dist/app-version.json'; \
-    test -z "$$(find '$(abspath $(WEB_DIR))/dist' -type l -print -quit)" || { echo 'Web build must not contain symlinks' >&2; exit 1; }; \
-    cp -R '$(abspath $(WEB_DIR))/dist' "$$context/web-dist"; printf '%s\n' "$$version" >"$$context/web-dist/one-web-revision.txt"; \
     mkdir -p .cache/fonts "$$context/fonts"; \
     for spec in 'Regular:faa6c9df652116dde789d351359f3d7e5d2285a2b2a1f04a2d7244df706d5ea9' 'Bold:c6cb5a93abaa9edc8ee7463b7ebb7f42d618d40e6ed2f7a5371c97b0b64767c0'; do \
         font="NotoSansSC-$${spec%%:*}.otf"; digest="$${spec#*:}"; cached=".cache/fonts/$$font"; \
@@ -337,27 +278,25 @@ fi
 endef
 
 # Upload through one shared SSH connection; remote bodies preserve the release
-# lock, atomic Web/manifest links, immutable images, health checks and rollback.
+# lock, atomic manifest links, immutable images, health checks and rollback.
 define ip_publish
-remote_script="$$IP_REMOTE_WEB"; [ "$$mode" != server ] || remote_script="$$IP_REMOTE_SERVER"; \
+remote_script="$$IP_REMOTE_SERVER"; \
 if [ "$$DRY_RUN" = true ]; then \
     if [ "$$mode" = server ] && [ "$$DEPLOY_TRANSFER" = ssh ]; then \
         $(ip_image_build); \
         printf '[plan] docker save %s | gzip | ssh %s gunzip | %sdocker load\n' "$$image" "$$DEPLOY_HOST" "$$elevate"; \
     elif [ "$$DEPLOY_TRANSFER" = release ]; then printf '[plan] server downloads and verifies GitHub Release %s (no build or SSH artifact upload)\n' "$$DEPLOY_RELEASE"; \
-    elif [ "$$mode" = web ]; then printf '[plan] pnpm --dir %s %s; upload stamped Web archive\n' '$(abspath $(WEB_DIR))' "$$build_script"; fi; \
+    fi; \
     printf '[plan] %s environment=%s version=%s host=%s directory=%s; ssh %sbash -se\n[remote]\n%s\n' "$$mode" "$$IP_DEPLOY_ENV" "$$version" "$$DEPLOY_HOST" "$$DEPLOY_DIR" "$$elevate" "$$remote_script"; \
 else \
     if [ "$$mode" = server ] && [ "$$DEPLOY_TRANSFER" = ssh ]; then $(ip_image_build); fi; \
-    if [ "$$mode" = web ] && [ "$$DEPLOY_TRANSFER" != release ]; then '$(PNPM)' --dir '$(abspath $(WEB_DIR))' "$$build_script"; fi; \
     ssh_command=(ssh -o BatchMode=yes -o ControlMaster=auto -o ControlPath=/tmp/ipbot-ssh-%C -o ServerAliveInterval=15 -o ServerAliveCountMax=8); \
-    incoming="$$DEPLOY_DIR/.deploy-$$(uuidgen | tr -d '-')"; remote_root="$$(printf '%q' "$$DEPLOY_DIR")"; remote_incoming="$$(printf '%q' "$$incoming")"; acquired=; archive_dir=; \
+    incoming="$$DEPLOY_DIR/.deploy-$$(uuidgen | tr -d '-')"; remote_root="$$(printf '%q' "$$DEPLOY_DIR")"; remote_incoming="$$(printf '%q' "$$incoming")"; acquired=; \
     cleanup() { \
         status=$$?; trap - EXIT; \
         if [ -n "$$acquired" ]; then \
             "$${ssh_command[@]}" "$$DEPLOY_HOST" "$${elevate}bash -se -- $$remote_root $$remote_incoming" <<< 'root=$$1; incoming=$$2; rm -rf -- "$$incoming"; if [ -f "$$root/.deployment-lock/owner" ] && [ "$$(cat "$$root/.deployment-lock/owner")" = "$$incoming" ]; then rm -f "$$root/.deployment-lock/owner"; rmdir "$$root/.deployment-lock"; fi' || true; \
         fi; \
-        [ -z "$$archive_dir" ] || rm -rf "$$archive_dir"; \
         "$${ssh_command[@]}" -O exit "$$DEPLOY_HOST" >/dev/null 2>&1 || true; exit "$$status"; \
     }; \
     trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' TERM; \
@@ -368,17 +307,10 @@ else \
     if [ "$$mode" = server ] && [ "$$DEPLOY_TRANSFER" = ssh ]; then \
         set -o pipefail; docker save "$$image" | gzip -1 | "$${ssh_command[@]}" "$$DEPLOY_HOST" "gunzip | $${elevate}docker load"; \
     fi; \
-    "$${ssh_command[@]}" "$$DEPLOY_HOST" "$${elevate}bash -se -- $$remote_root $$remote_incoming $$version" <<< 'root=$$1; incoming=$$2; version=$$3; test -d "$$root"; test ! -e "$$root/web/current" || test -L "$$root/web/current"; test ! -e "$$root/web/releases/$$version"; test ! -L "$$root/web/releases/$$version"; mkdir "$$root/.deployment-lock"; printf "%s\n" "$$incoming" >"$$root/.deployment-lock/owner"; trap '\''rm -f "$$root/.deployment-lock/owner"; rmdir "$$root/.deployment-lock"'\'' EXIT; mkdir "$$incoming"; trap - EXIT'; \
+    "$${ssh_command[@]}" "$$DEPLOY_HOST" "$${elevate}bash -se -- $$remote_root $$remote_incoming $$version" <<< 'root=$$1; incoming=$$2; version=$$3; test -d "$$root"; test ! -e "$$root/deployments/$$version"; test ! -L "$$root/deployments/$$version"; mkdir "$$root/.deployment-lock"; printf "%s\n" "$$incoming" >"$$root/.deployment-lock/owner"; trap '\''rm -f "$$root/.deployment-lock/owner"; rmdir "$$root/.deployment-lock"'\'' EXIT; mkdir "$$incoming"; trap - EXIT'; \
     acquired=1; \
     if [ "$$DEPLOY_TRANSFER" = release ]; then \
         :; \
-    elif [ "$$mode" = web ]; then \
-        test -f '$(abspath $(WEB_DIR))/dist/index.html'; test -f '$(abspath $(WEB_DIR))/dist/app-version.json'; \
-        test -z "$$(find '$(abspath $(WEB_DIR))/dist' -type l -print -quit)" || { echo 'Web build must not contain symlinks' >&2; exit 1; }; \
-        archive_dir="$$(mktemp -d)"; cp -R '$(abspath $(WEB_DIR))/dist' "$$archive_dir/web"; \
-        printf '%s\n' "$$version" >"$$archive_dir/web/one-web-revision.txt"; \
-        tar -cf "$$archive_dir/web.tar" -C "$$archive_dir" web; \
-        "$${ssh_command[@]}" "$$DEPLOY_HOST" "$${elevate}tee $$remote_incoming/web.tar >/dev/null" <"$$archive_dir/web.tar"; \
     else \
         "$${ssh_command[@]}" "$$DEPLOY_HOST" "$${elevate}tee $$remote_incoming/docker-compose.yml >/dev/null" <deploy/docker/docker-compose.yml; \
     fi; \
