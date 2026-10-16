@@ -49,7 +49,7 @@ Action 仓库必须干净，且 HEAD 等于已发布的 `origin/main`。本地�
 
 Web、Server 构建和 Server 部署统一使用 GitHub Environment `prod`。Pages 项目固定为 `ipbot`，生产分支固定为 `main`，无需配置 GitHub Variables。Server 地址和 SSH 用户名必须配置为 `prod` Secrets `DEPLOY_HOST`、`DEPLOY_USER`；SSH 端口默认 `22`。
 
-账户 ID 和 token 没有默认值；workflow 不查找或猜测账户，也不创建项目、修改 DNS、自定义域名或证书。先在正确账户建立 Direct Upload 项目并上传前端，准备 API 域名、TLS 与后端允许的前端 Origin；正式切换时协调 API 发布与 Pages 接管 `ipbot.net`。新 Server 不再托管旧主站，若需要过渡，可临时挂载现有 Web 目录并显式设置 `WEB_DIST_DIR`，切换完成后再使用 API-only Compose。前端生产构建使用 `VITE_API_BASE_URL=https://api.ipbot.net/api`。
+账户 ID 和 token 没有默认值；workflow 只使用明确配置的账户，先检查 Pages 项目，缺少 `ipbot` 时创建生产分支为 `main` 的 Direct Upload 项目，然后上传前端。DNS、自定义域名和证书仍由运维配置，正式切换时协调 API 发布与 Pages 接管 `ipbot.net`。新 Server 不再托管旧主站，若需要过渡，可临时挂载现有 Web 目录并显式设置 `WEB_DIST_DIR`，切换完成后再使用 API-only Compose。前端生产构建使用 `VITE_API_BASE_URL=https://api.ipbot.net/api`。
 
 默认 workflow 权限为 `contents: read`，仅 Server 的 Release job 使用 `contents: write`，通过 GitHub 自动提供的 `GITHUB_TOKEN` 向本 Action 仓库发布 Release。Web 使用 Wrangler CLI 直接上传，不向 GitHub Deployment API 写入，不要求 `deployments: write`。Server 与 Web 使用独立 concurrency group，互不等待对方的构建或发布。
 
@@ -61,7 +61,9 @@ Web、Server 构建和 Server 部署统一使用 GitHub Environment `prod`。Pag
 
 Server job 只 checkout Action 和 Backend。在 Bookworm 容器编译 Rust，复用 Cargo registry、git、target 和字体缓存，再将二进制与校验过的字体打包为 `linux/amd64` 运行镜像，不安装 pnpm、不构建或打包 Web。
 
-公开 Release `deploy-server-<version>` 只包含 `server-image.tar.gz`、`docker-compose.yml` 和 `checksums.txt`。SSH 仅传部署指令及清单 SHA256；服务器从 Release 下载，校验清单与全部产物后加载镜像、执行 Compose、检查回环 `/readyz`，成功后切换 `deployments/current`。失败时沿用之前的 manifest、release.env 和镜像 ID 恢复 Server；失败与历史版本目录保留用于排查，不自动覆盖。
+公开 Release `deploy-server-<version>` 只包含 `server-image.tar.gz`、`docker-compose.yml` 和 `checksums.txt`。SSH 仅传部署指令及清单 SHA256；服务器从 Release 下载，校验清单与全部产物后加载镜像、执行 Compose、检查回环 `/readyz`，成功后切换 `deployments/current`。失败时先输出容器状态和最近 100 行日志，再沿用之前的 manifest、release.env 和镜像 ID 恢复 Server；失败与历史版本目录保留用于排查，不自动覆盖。
+
+新镜像通过 `net.ipbot.schema-upgrade=site-results-v1` 标记支持保留数据的 `upgrade` 命令。部署先在候选镜像的一次性容器中补充 `ipbot_egress_snapshots.site_results` 并检查结构，成功后才替换服务容器；升级失败时现有服务继续运行。该升级只增加可空字段及 JSON 数组约束，旧镜像可以继续使用升级后的数据库；没有此标记的历史镜像跳过此步骤。发布前仍应按数据库备份流程保存现有数据。
 
 Server 不提取 Web、不切换 `web/current`，也不检查首页或 Web revision。Compose 不再挂载 `./web`，并显式设置 `WEB_DIST_DIR: ""`，覆盖旧 `.env` 里的静态目录值。旧 Web 目录不由发布脚本删除。API 只绑定回环 HTTP 端口，由 Nginx 的 `api.ipbot.net` 入口转发；`APP_PUBLIC_URL` 仍表示受信任的前端 Origin `https://ipbot.net`，不是 API 域名。
 

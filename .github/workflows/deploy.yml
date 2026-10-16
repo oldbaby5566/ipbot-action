@@ -131,6 +131,11 @@ jobs:
           set -euo pipefail
           : "${CLOUDFLARE_ACCOUNT_ID:?Set CLOUDFLARE_ACCOUNT_ID in prod}"
           : "${CLOUDFLARE_API_TOKEN:?Set CLOUDFLARE_API_TOKEN in prod}"
+          pnpm --silent dlx wrangler@4 pages project list --json > "$RUNNER_TEMP/pages-projects.json"
+          project_exists=$(node -e 'const fs = require("node:fs"); const projects = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); console.log(projects.some(project => project["Project Name"] === process.env.PAGES_PROJECT));' "$RUNNER_TEMP/pages-projects.json")
+          if [ "$project_exists" = false ]; then
+            pnpm dlx wrangler@4 pages project create "$PAGES_PROJECT" --production-branch "$PAGES_BRANCH"
+          fi
           pnpm dlx wrangler@4 pages deploy dist --project-name "$PAGES_PROJECT" \
             --branch "$PAGES_BRANCH" --commit-hash "$WEB_SHA" --commit-dirty=true
 
