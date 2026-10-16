@@ -13,7 +13,7 @@ class MakeEntryContracts(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             action = Path(directory) / "action fixture"
             action.mkdir()
-            targets = "deploy-server deploy-web deploy-test"
+            targets = "deploy deploy-server deploy-web deploy-test"
             (action / "Makefile").write_text(
                 f".PHONY: {targets}\n{targets}:\n"
                 "\t@printf '%s\\n' '$@' '$(BACKEND_DIR)' '$(WEB_DIR)' '$(VERSION)' '$(DRY_RUN)' '$(PNPM)'\n")
@@ -25,11 +25,8 @@ class MakeEntryContracts(unittest.TestCase):
                             "VERSION=1.2.3", "DRY_RUN=true", "PNPM=fixture-pnpm",
                         ], cwd=ROOT.parent / source, text=True, capture_output=True)
                         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                        expected = target
-                        if target == "deploy":
-                            expected = "deploy-server" if source == "backend" else "deploy-web"
                         self.assertEqual(result.stdout.splitlines(), [
-                            expected, str(ROOT.parent / "backend"), str(ROOT.parent / "web"),
+                            target, str(ROOT.parent / "backend"), str(ROOT.parent / "web"),
                             "1.2.3", "true", "fixture-pnpm",
                         ])
 

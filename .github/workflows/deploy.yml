@@ -3,6 +3,7 @@ name: One IP Deploy
 "on":
   push:
     tags:
+      - deploy-all-*
       - deploy-server-*
       - deploy-web-*
 
@@ -12,10 +13,6 @@ permissions:
 env:
   PAGES_PROJECT: ipbot
   PAGES_BRANCH: main
-
-concurrency:
-  group: one-ip-${{ startsWith(github.ref_name, 'deploy-server-') && 'server' || 'web' }}-prod
-  cancel-in-progress: false
 
 jobs:
   prepare:
@@ -27,6 +24,7 @@ jobs:
       backend_ref: ${{ steps.release.outputs.backend_ref }}
       web_ref: ${{ steps.release.outputs.web_ref }}
       action_sha: ${{ steps.release.outputs.action_sha }}
+      release_tag: ${{ steps.release.outputs.release_tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -71,26 +69,32 @@ jobs:
           require(all(isinstance(value, str) for value in release.values()), "Release fields must be strings")
           target = release["target"]
           version = release["version"]
-          require(target in ("server", "web"), "Invalid release target")
+          require(target in ("server", "web", "all"), "Invalid release target")
           require(re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", version), "Invalid release version")
           require(tag == f"deploy-{target}-{version}", "Release tag does not match its annotation")
           require(re.fullmatch(r"[0-9a-f]{40}", action_sha), "Invalid Action commit")
           require(release["expected_action_sha"] == action_sha, "Expected Action commit mismatch")
-          source_field = "backend_ref" if target == "server" else "web_ref"
-          unused_field = "web_ref" if target == "server" else "backend_ref"
-          require(re.fullmatch(r"[0-9a-f]{40}", release[source_field]), "Invalid source commit")
-          require(release[unused_field] == "", "Unexpected source commit for release target")
+          sources = {"server": {"backend_ref"}, "web": {"web_ref"}, "all": {"backend_ref", "web_ref"}}[target]
+          for field in ("backend_ref", "web_ref"):
+              if field in sources:
+                  require(re.fullmatch(r"[0-9a-f]{40}", release[field]), f"Invalid {field}")
+              else:
+                  require(release[field] == "", f"Unexpected {field} for release target")
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
               for key in ("target", "version", "backend_ref", "web_ref"):
                   output.write(f"{key}={release[key]}\n")
               output.write(f"action_sha={action_sha}\n")
+              output.write(f"release_tag={tag}\n")
           PY
 
   web:
     needs: prepare
-    if: needs.prepare.outputs.target == 'web'
+    if: needs.prepare.outputs.target != 'server'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    concurrency:
+      group: one-ip-web-prod
+      cancel-in-progress: false
     environment:
       name: prod
       url: https://ipbot.net
@@ -141,7 +145,7 @@ jobs:
 
   server:
     needs: prepare
-    if: needs.prepare.outputs.target == 'server'
+    if: needs.prepare.outputs.target != 'web'
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     environment:
@@ -207,6 +211,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           ACTION_SHA: ${{ needs.prepare.outputs.action_sha }}
           VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
           BACKEND_SHA: ${{ needs.prepare.outputs.backend_ref }}
         run: |
           set -euo pipefail
@@ -214,7 +219,7 @@ jobs:
           sha256sum "${assets[@]}" > checksums.txt
           printf 'checksum=%s\n' "$(sha256sum checksums.txt | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
           printf 'Server: %s\nAction: %s\n' "$BACKEND_SHA" "$ACTION_SHA" > release.txt
-          gh release create "deploy-server-$VERSION" "${assets[@]}" checksums.txt \
+          gh release create "$RELEASE_TAG" "${assets[@]}" checksums.txt \
             --verify-tag --title "One IP server $VERSION" --notes-file release.txt --latest=false
 
   deploy:
@@ -222,6 +227,9 @@ jobs:
     if: ${{ !cancelled() && needs.publish.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    concurrency:
+      group: one-ip-server-prod
+      cancel-in-progress: false
     environment:
       name: prod
       url: https://api.ipbot.net
@@ -245,8 +253,9 @@ jobs:
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
           CHECKSUM: ${{ needs.publish.outputs.checksum }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
         run: |
-          make publish-server DEPLOY_VERSION="$VERSION" DEPLOY_CHECKSUM="$CHECKSUM"
+          make publish-server DEPLOY_VERSION="$VERSION" DEPLOY_CHECKSUM="$CHECKSUM" DEPLOY_RELEASE_TAG="$RELEASE_TAG"
       - name: Public API readiness check
         run: |
           set -uo pipefail

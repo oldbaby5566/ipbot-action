@@ -55,6 +55,13 @@ class DeploymentContracts(unittest.TestCase):
         self.assertNotIn("docker save", plan)
         self.assertNotIn("pnpm", plan)
         self.assertNotIn("web.tar", result.stdout)
+        result = make("publish-server", DEPLOY_RELEASE_TAG="deploy-all-v1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("GitHub Release deploy-all-v1", result.stdout)
+        for tag in ("deploy-web-v1", "deploy-all-v2", "deploy-all-v1;id"):
+            result = make("publish-server", DEPLOY_RELEASE_TAG=tag)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn("[plan]", result.stdout)
 
     def fixture(self, directory, *, fail=False, initial=False, managed=False,
                 corrupt=False, bad_manifest=False, download_failure=False):

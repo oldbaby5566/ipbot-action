@@ -17,12 +17,15 @@
 发布、构建与 SSH 配置直接由 `Makefile` 和 `make/*.mk` 调用 Git、Cargo、pnpm、Docker、curl 等原生命令，不依赖额外的 `.sh` 脚本。GitHub workflow 的 Server 构建与 SSH 配置分别调用 `make build-server` 和 `make configure-ssh`。
 
 ```sh
-make deploy-server               # 仅 API Server；make deploy 同义
+make deploy                      # 前后端一起发布，Action 中 Web 与 Server 并发部署
+make deploy-server               # 仅 API Server
 make deploy-web                  # 仅 Cloudflare Pages Web
-make deploy-server DRY_RUN=true  # 仓库预检与计划，不构建、不发布
+make deploy DRY_RUN=true         # 仓库预检与计划，不构建、不发布
 make deploy-web DRY_RUN=true
 make deploy-test                 # 本地部署契约测试，不连接服务器或 Docker
 ```
+
+`deploy` 同时检查、升级、提交和推送 Backend 与 Web（源码标签分别为 `deploy-server-<version>`、`v<version>`），再向 Action 仓库推送一个 `deploy-all-<version>` annotated tag，annotation 同时带 `backend_ref` 和 `web_ref`。workflow 中 `web` 与 `server` job 并行运行：Pages 上传与 Server 构建、Release、SSH 部署互不等待；Server Release 名称与触发标签相同（`deploy-all-<version>`）。任一源码检查失败时两边都不提交、不打标签。
 
 `deploy-server` 只检查、升级、提交和推送 Backend，创建 `deploy-server-<version>` 源码标签，再向 Action 仓库推送同名 annotated tag，通过 `push.tags` 触发 `deploy.yml`。不读取、检查或升级 Web 仓库。
 
@@ -51,7 +54,7 @@ Web、Server 构建和 Server 部署统一使用 GitHub Environment `prod`。Pag
 
 账户 ID 和 token 没有默认值；workflow 只使用明确配置的账户，先检查 Pages 项目，缺少 `ipbot` 时创建生产分支为 `main` 的 Direct Upload 项目，然后上传前端。DNS、自定义域名和证书仍由运维配置，正式切换时协调 API 发布与 Pages 接管 `ipbot.net`。新 Server 不再托管旧主站，若需要过渡，可临时挂载现有 Web 目录并显式设置 `WEB_DIST_DIR`，切换完成后再使用 API-only Compose。前端生产构建使用 `VITE_API_BASE_URL=https://api.ipbot.net/api`。
 
-默认 workflow 权限为 `contents: read`，仅 Server 的 Release job 使用 `contents: write`，通过 GitHub 自动提供的 `GITHUB_TOKEN` 向本 Action 仓库发布 Release。Web 使用 Wrangler CLI 直接上传，不向 GitHub Deployment API 写入，不要求 `deployments: write`。Server 与 Web 使用独立 concurrency group，互不等待对方的构建或发布。
+默认 workflow 权限为 `contents: read`，仅 Server 的 Release job 使用 `contents: write`，通过 GitHub 自动提供的 `GITHUB_TOKEN` 向本 Action 仓库发布 Release。Web 使用 Wrangler CLI 直接上传，不向 GitHub Deployment API 写入，不要求 `deployments: write`。Web job 与 Server 部署 job 分别使用 job 级 concurrency group `one-ip-web-prod`、`one-ip-server-prod`：同一组件的发布串行，前后端之间（包括 `deploy-all` 内部）并发。
 
 本机发布只通过各仓库 `origin` 的 SSH 认证推送源码和 Action 标签，需要所选源码仓库与 Action 仓库的推送权限，不使用本地 API Token、`gh` 登录凭据或 Git HTTPS credential helper。CI 的 `GH_TOKEN`、服务器 SSH 和 Cloudflare Secrets 仍保存在 GitHub。公开仓库的 workflow 日志和 Server Release 产物均公开，不能将业务环境文件、凭据或数据库内容放入产物。
 

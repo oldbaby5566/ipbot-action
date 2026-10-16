@@ -3,8 +3,9 @@ DEPLOY_VERSION ?=
 DEPLOY_PORT ?= 27528
 DEPLOY_NAME ?= one-ip
 DEPLOY_CHECKSUM ?=
+DEPLOY_RELEASE_TAG ?=
 DRY_RUN ?= false
-export DEPLOY_HOST DEPLOY_DIR DEPLOY_VERSION DEPLOY_PORT DEPLOY_NAME DEPLOY_CHECKSUM DRY_RUN
+export DEPLOY_HOST DEPLOY_DIR DEPLOY_VERSION DEPLOY_PORT DEPLOY_NAME DEPLOY_CHECKSUM DEPLOY_RELEASE_TAG DRY_RUN
 
 .PHONY: publish-server deploy-test
 publish-server: ## Deploy the published Server release with readiness checks and rollback
@@ -12,6 +13,8 @@ publish-server: ## Deploy the published Server release with readiness checks and
 	case "$$DRY_RUN" in true|false) ;; *) echo 'DRY_RUN must be true or false' >&2; exit 1 ;; esac; \
 	[[ "$$DEPLOY_VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$$ ]] || { echo 'Set DEPLOY_VERSION to the published release version' >&2; exit 1; }; \
 	[[ "$$DEPLOY_CHECKSUM" =~ ^[a-f0-9]{64}$$ ]] || { echo 'DEPLOY_CHECKSUM must be the trusted SHA256 of checksums.txt' >&2; exit 1; }; \
+	release_tag=$${DEPLOY_RELEASE_TAG:-deploy-server-$$DEPLOY_VERSION}; \
+	[[ "$$release_tag" == "deploy-server-$$DEPLOY_VERSION" || "$$release_tag" == "deploy-all-$$DEPLOY_VERSION" ]] || { echo 'DEPLOY_RELEASE_TAG must be deploy-server-<version> or deploy-all-<version>' >&2; exit 1; }; \
 	[[ "$$DEPLOY_HOST" =~ ^[A-Za-z0-9][A-Za-z0-9@._-]*$$ ]] || { echo 'Set DEPLOY_HOST to an SSH host or alias' >&2; exit 1; }; \
 	[[ "$$DEPLOY_DIR" = /* && ! "$$DEPLOY_DIR" =~ [[:cntrl:]] ]] || { echo 'DEPLOY_DIR must be an absolute non-root directory' >&2; exit 1; }; \
 	IFS=/ read -r -a parts <<< "$$DEPLOY_DIR"; depth=0; \
@@ -20,12 +23,12 @@ publish-server: ## Deploy the published Server release with readiness checks and
 	[[ "$$DEPLOY_PORT" =~ ^[0-9]{1,5}$$ ]] && [ "$$DEPLOY_PORT" -ge 1 ] && [ "$$DEPLOY_PORT" -le 65535 ] || { echo 'DEPLOY_PORT must be a valid port' >&2; exit 1; }; \
 	[[ "$$DEPLOY_NAME" =~ ^[a-z0-9][a-z0-9_-]{0,63}$$ ]] || { echo 'DEPLOY_NAME must be a Compose project name' >&2; exit 1; }; \
 	if [ "$$DRY_RUN" = true ]; then \
-	    printf '[plan] server downloads and verifies GitHub Release deploy-server-%s; host=%s directory=%s port=%s\n[remote]\n%s\n' \
-	        "$$DEPLOY_VERSION" "$$DEPLOY_HOST" "$$DEPLOY_DIR" "$$DEPLOY_PORT" "$$IP_REMOTE_SERVER"; \
+	    printf '[plan] server downloads and verifies GitHub Release %s; host=%s directory=%s port=%s\n[remote]\n%s\n' \
+	        "$$release_tag" "$$DEPLOY_HOST" "$$DEPLOY_DIR" "$$DEPLOY_PORT" "$$IP_REMOTE_SERVER"; \
 	else \
 	    printf '%s\n' "$$IP_REMOTE_SERVER" | ssh -o BatchMode=yes -o ConnectTimeout=15 \
 	        -o ServerAliveInterval=15 -o ServerAliveCountMax=8 "$$DEPLOY_HOST" \
-	        "bash -se -- $$(printf '%q' "$$DEPLOY_DIR") $$DEPLOY_VERSION $$DEPLOY_PORT $$DEPLOY_NAME $$DEPLOY_CHECKSUM"; \
+	        "bash -se -- $$(printf '%q' "$$DEPLOY_DIR") $$DEPLOY_VERSION $$DEPLOY_PORT $$DEPLOY_NAME $$DEPLOY_CHECKSUM $$release_tag"; \
 	fi
 
 deploy-test: ## Run local deployment contracts without network or Docker
@@ -35,7 +38,7 @@ deploy-test: ## Run local deployment contracts without network or Docker
 define IP_REMOTE_SERVER
 set -euo pipefail
 root=$$1; version=$$2; port=$$3; name=$$4; checksum=$$5
-release_tag="deploy-server-$$version"; image="one-ip:$$version"
+release_tag=$${6:-deploy-server-$$version}; image="one-ip:$$version"
 incoming="$$root/.deploy-$$version-$$$$"
 manifest="$$root/deployments/$$version/docker-compose.yml"
 locked=0

@@ -79,7 +79,8 @@ if os.environ["FAIL_GATE"] == tool: sys.exit(23)
                    BACKEND_DIR=str(repos["backend"]),
                    WEB_DIR=str(repos["web"]), ACTION_DIR=str(repos["action"]),
                    DRY_RUN=str(dry_run).lower())
-        result = subprocess.run(["make", "--no-print-directory", f"deploy-{target}"],
+        make_target = "deploy" if target == "all" else f"deploy-{target}"
+        result = subprocess.run(["make", "--no-print-directory", make_target],
                                 cwd=ROOT, env=env, capture_output=True, text=True)
         return repos, initial, result
 
@@ -105,8 +106,29 @@ if os.environ["FAIL_GATE"] == tool: sys.exit(23)
             self.assertEqual(git(repos["web"], "tag"), "")
             self.assertNotIn("pnpm:", (Path(directory) / "gates.log").read_text())
 
+    def test_deploy_publishes_backend_and_web_under_one_action_tag(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repos, initial, result = self.fixture(directory, target="all")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            release_tag = "deploy-all-1.2.3"
+            payload = json.loads(git(repos["action"], "for-each-ref", "--format=%(contents)", f"refs/tags/{release_tag}"))
+            self.assertEqual(payload, dict(
+                target="all", version="1.2.3", expected_action_sha=initial["action"],
+                backend_ref=git(repos["backend"], "rev-parse", "deploy-server-1.2.3"),
+                web_ref=git(repos["web"], "rev-parse", "v1.2.3")))
+            self.assertEqual(git(Path(directory) / "action.git", "rev-parse", release_tag), git(repos["action"], "rev-parse", release_tag))
+            for name in ("backend", "web"):
+                self.assertEqual(git(repos[name], "status", "--porcelain"), "")
+                self.assertNotEqual(git(repos[name], "rev-parse", "HEAD"), initial[name])
+                self.assertEqual(git(repos[name], "rev-parse", "HEAD"), git(Path(directory) / f"{name}.git", "rev-parse", "main"))
+            self.assertIn('"version": "1.2.3"', (repos["web"] / "package.json").read_text())
+            self.assertIn('version = "1.2.3"', (repos["backend"] / "Cargo.toml").read_text())
+            gates = (Path(directory) / "gates.log").read_text()
+            self.assertIn("cargo:", gates)
+            self.assertIn("pnpm:", gates)
+
     def test_each_failed_check_blocks_versions_and_release_tags(self):
-        for target, tool in (("web", "pnpm"), ("server", "cargo")):
+        for target, tool in (("web", "pnpm"), ("server", "cargo"), ("all", "cargo"), ("all", "pnpm")):
             with self.subTest(target=target, tool=tool), tempfile.TemporaryDirectory() as directory:
                 repos, initial, result = self.fixture(directory, target=target, fail=tool)
                 self.assertNotEqual(result.returncode, 0)
