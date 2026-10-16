@@ -1,4 +1,6 @@
-name: One IP Deploy
+name: One IP Server / One IP Web
+run-name: >-
+  ${{ startsWith(github.ref_name, 'deploy-server-') && 'One IP Server' || startsWith(github.ref_name, 'deploy-web-') && 'One IP Web' || 'One IP Server + One IP Web' }} (${{ github.ref_name }})
 
 "on":
   push:
@@ -88,6 +90,7 @@ jobs:
           PY
 
   web:
+    name: One IP Web
     needs: prepare
     if: needs.prepare.outputs.target != 'server'
     runs-on: ubuntu-24.04
@@ -144,6 +147,7 @@ jobs:
             --branch "$PAGES_BRANCH" --commit-hash "$WEB_SHA" --commit-dirty=true
 
   server:
+    name: One IP Server
     needs: prepare
     if: needs.prepare.outputs.target != 'web'
     runs-on: ubuntu-24.04
@@ -190,6 +194,7 @@ jobs:
           retention-days: 2
 
   publish:
+    name: One IP Server Release
     needs: [prepare, server]
     if: ${{ !cancelled() && needs.server.result == 'success' }}
     runs-on: ubuntu-24.04
@@ -223,6 +228,7 @@ jobs:
             --verify-tag --title "One IP server $VERSION" --notes-file release.txt --latest=false
 
   deploy:
+    name: One IP Server Deploy
     needs: [prepare, publish]
     if: ${{ !cancelled() && needs.publish.result == 'success' }}
     runs-on: ubuntu-24.04
