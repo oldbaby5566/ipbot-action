@@ -1,17 +1,10 @@
 name: One IP Deploy
 
 "on":
-  workflow_dispatch:
-    inputs:
-      target:
-        description: server = API Docker; web = Cloudflare Pages
-        required: true
-        type: choice
-        options: [server, web]
-      version: { required: true, type: string }
-      backend_ref: { description: Exact ipbot-server commit (server only), required: false, type: string }
-      web_ref: { description: Exact ipbot-web commit (web only), required: false, type: string }
-      expected_action_sha: { description: Exact ipbot-action commit, required: true, type: string }
+  push:
+    tags:
+      - deploy-server-*
+      - deploy-web-*
 
 permissions:
   contents: read
@@ -21,36 +14,81 @@ env:
   PAGES_BRANCH: main
 
 concurrency:
-  group: one-ip-${{ inputs.target }}-prod
+  group: one-ip-${{ startsWith(github.ref_name, 'deploy-server-') && 'server' || 'web' }}-prod
   cancel-in-progress: false
 
 jobs:
   prepare:
     runs-on: ubuntu-24.04
     timeout-minutes: 2
+    outputs:
+      target: ${{ steps.release.outputs.target }}
+      version: ${{ steps.release.outputs.version }}
+      backend_ref: ${{ steps.release.outputs.backend_ref }}
+      web_ref: ${{ steps.release.outputs.web_ref }}
+      action_sha: ${{ steps.release.outputs.action_sha }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
       - name: Validate release
+        id: release
         env:
           REPOSITORY: ${{ github.repository }}
           ACTION_SHA: ${{ github.sha }}
-          EXPECTED_ACTION_SHA: ${{ inputs.expected_action_sha }}
-          TARGET: ${{ inputs.target }}
-          VERSION: ${{ inputs.version }}
-          BACKEND_SHA: ${{ inputs.backend_ref }}
-          WEB_SHA: ${{ inputs.web_ref }}
+          RELEASE_REF: ${{ github.ref }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          [[ "$REPOSITORY" == oldbaby5566/ipbot-action && "$ACTION_SHA" == "$EXPECTED_ACTION_SHA" ]]
-          [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
-          case "$TARGET" in
-            server) [[ "$BACKEND_SHA" =~ ^[0-9a-f]{40}$ ]] ;;
-            web) [[ "$WEB_SHA" =~ ^[0-9a-f]{40}$ ]] ;;
-            *) exit 1 ;;
-          esac
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+
+          def git(*args):
+              return subprocess.check_output(["git", *args], text=True).rstrip("\n")
+
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(message)
+
+          ref = os.environ["RELEASE_REF"]
+          tag = os.environ["RELEASE_TAG"]
+          action_sha = os.environ["ACTION_SHA"]
+          require(os.environ["REPOSITORY"] == "oldbaby5566/ipbot-action", "Unexpected Action repository")
+          require(ref == f"refs/tags/{tag}", "Release must be triggered by a tag")
+          require(git("cat-file", "-t", ref) == "tag", "Release requires an annotated tag")
+          require(git("rev-parse", f"{ref}^{{commit}}") == action_sha, "Action tag commit mismatch")
+          subject = git("for-each-ref", "--format=%(contents:subject)", ref)
+          annotation = git("for-each-ref", "--format=%(contents)", ref)
+          require(annotation == subject and "\n" not in subject, "Tag annotation must be a single JSON line")
+          release = json.loads(subject)
+          require(isinstance(release, dict), "Tag annotation must be a JSON object")
+          require(set(release) == {"target", "version", "backend_ref", "web_ref", "expected_action_sha"}, "Unexpected release fields")
+          require(all(isinstance(value, str) for value in release.values()), "Release fields must be strings")
+          target = release["target"]
+          version = release["version"]
+          require(target in ("server", "web"), "Invalid release target")
+          require(re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", version), "Invalid release version")
+          require(tag == f"deploy-{target}-{version}", "Release tag does not match its annotation")
+          require(re.fullmatch(r"[0-9a-f]{40}", action_sha), "Invalid Action commit")
+          require(release["expected_action_sha"] == action_sha, "Expected Action commit mismatch")
+          source_field = "backend_ref" if target == "server" else "web_ref"
+          unused_field = "web_ref" if target == "server" else "backend_ref"
+          require(re.fullmatch(r"[0-9a-f]{40}", release[source_field]), "Invalid source commit")
+          require(release[unused_field] == "", "Unexpected source commit for release target")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              for key in ("target", "version", "backend_ref", "web_ref"):
+                  output.write(f"{key}={release[key]}\n")
+              output.write(f"action_sha={action_sha}\n")
+          PY
 
   web:
     needs: prepare
-    if: inputs.target == 'web'
+    if: needs.prepare.outputs.target == 'web'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment:
@@ -60,7 +98,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: oldbaby5566/ipbot-web
-          ref: ${{ inputs.web_ref }}
+          ref: ${{ needs.prepare.outputs.web_ref }}
           path: web
           token: ${{ secrets.GH_TOKEN }}
           persist-credentials: false
@@ -74,7 +112,7 @@ jobs:
           cache-dependency-path: web/pnpm-lock.yaml
       - name: Build Web
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
           pnpm --dir web install --frozen-lockfile
@@ -88,7 +126,7 @@ jobs:
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          WEB_SHA: ${{ inputs.web_ref }}
+          WEB_SHA: ${{ needs.prepare.outputs.web_ref }}
         run: |
           set -euo pipefail
           : "${CLOUDFLARE_ACCOUNT_ID:?Set CLOUDFLARE_ACCOUNT_ID in prod}"
@@ -98,7 +136,7 @@ jobs:
 
   server:
     needs: prepare
-    if: inputs.target == 'server'
+    if: needs.prepare.outputs.target == 'server'
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     environment:
@@ -107,12 +145,13 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.prepare.outputs.action_sha }}
           path: action
           persist-credentials: false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: oldbaby5566/ipbot-server
-          ref: ${{ inputs.backend_ref }}
+          ref: ${{ needs.prepare.outputs.backend_ref }}
           path: backend
           token: ${{ secrets.GH_TOKEN }}
           persist-credentials: false
@@ -122,14 +161,14 @@ jobs:
             .cache/cargo
             .cache/target
             .cache/fonts
-          key: ipbot-server-amd64-${{ hashFiles('backend/Cargo.lock', 'backend/rust-toolchain.toml') }}-${{ inputs.backend_ref }}
+          key: ipbot-server-amd64-${{ hashFiles('backend/Cargo.lock', 'backend/rust-toolchain.toml') }}-${{ needs.prepare.outputs.backend_ref }}
           restore-keys: |
             ipbot-server-amd64-${{ hashFiles('backend/Cargo.lock', 'backend/rust-toolchain.toml') }}-
             ipbot-server-amd64-
       - name: Build and package Server
         working-directory: action
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: make build-server
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -142,7 +181,7 @@ jobs:
           retention-days: 2
 
   publish:
-    needs: server
+    needs: [prepare, server]
     if: ${{ !cancelled() && needs.server.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -161,9 +200,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          ACTION_SHA: ${{ github.sha }}
-          VERSION: ${{ inputs.version }}
-          BACKEND_SHA: ${{ inputs.backend_ref }}
+          ACTION_SHA: ${{ needs.prepare.outputs.action_sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          BACKEND_SHA: ${{ needs.prepare.outputs.backend_ref }}
         run: |
           set -euo pipefail
           assets=(server-image.tar.gz docker-compose.yml)
@@ -171,10 +210,10 @@ jobs:
           printf 'checksum=%s\n' "$(sha256sum checksums.txt | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
           printf 'Server: %s\nAction: %s\n' "$BACKEND_SHA" "$ACTION_SHA" > release.txt
           gh release create "deploy-server-$VERSION" "${assets[@]}" checksums.txt \
-            --target "$ACTION_SHA" --title "One IP server $VERSION" --notes-file release.txt --latest=false
+            --verify-tag --title "One IP server $VERSION" --notes-file release.txt --latest=false
 
   deploy:
-    needs: publish
+    needs: [prepare, publish]
     if: ${{ !cancelled() && needs.publish.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -184,6 +223,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.prepare.outputs.action_sha }}
           path: action
           persist-credentials: false
       - name: Configure SSH
@@ -198,7 +238,7 @@ jobs:
       - name: Download on server and deploy API
         working-directory: action
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ needs.prepare.outputs.version }}
           CHECKSUM: ${{ needs.publish.outputs.checksum }}
         run: |
           make publish-server DEPLOY_VERSION="$VERSION" DEPLOY_CHECKSUM="$CHECKSUM"

@@ -24,19 +24,23 @@ make deploy-web DRY_RUN=true
 make deploy-test                 # 本地部署契约测试，不连接服务器或 Docker
 ```
 
-`deploy-server` 只检查、升级、提交和推送 Backend，创建 `deploy-server-<version>` 源码标签，然后携带精确 Backend SHA 触发 `deploy.yml`。不读取、检查或升级 Web 仓库。
+`deploy-server` 只检查、升级、提交和推送 Backend，创建 `deploy-server-<version>` 源码标签，再向 Action 仓库推送同名 annotated tag，通过 `push.tags` 触发 `deploy.yml`。不读取、检查或升级 Web 仓库。
 
-`deploy-web` 只检查、升级、提交和推送 Web，创建 `v<version>` 源码标签，然后携带精确 Web SHA 触发同一 workflow。不读取、检查或升级 Backend 仓库。Web 在 runner 安装依赖、构建 `dist`，随后通过 `wrangler pages deploy dist` 直接上传 Pages，不发布 GitHub Web 压缩包，不执行 SSH 或重启 Server。
+`deploy-web` 只检查、升级、提交和推送 Web，创建 `v<version>` 源码标签，再向 Action 仓库推送 `deploy-web-<version>` annotated tag，触发同一 workflow。不读取、检查或升级 Backend 仓库。Web 在 runner 安装依赖、构建 `dist`，随后通过 `wrangler pages deploy dist` 直接上传 Pages，不发布 GitHub Web 压缩包，不执行 SSH 或重启 Server。
 
-本地发布入口保留各自的发布检查：Server 使用 Cargo fmt、Clippy 和 tests；Web 使用 install、typecheck、lint、test、build。检查失败时不提交或 dispatch。
+Action 标签指向已发布的 Action `main` HEAD，annotation 为包含 `target`、`version`、`backend_ref`、`web_ref`、`expected_action_sha` 的单行 JSON。workflow 校验标签名称、版本、Action SHA 和所选源码的完整 40 位 SHA，按精确提交构建。
 
-Action 仓库必须干净，且 HEAD 等于已发布的 `origin/main`。本地发布器只检查所选源码仓库和 Action 仓库的状态，要求源码分支不落后于 origin。`DRY_RUN=true` 仍会读取 Git 状态和 fetch 仓库信息，但不执行检查、版本修改、提交、push、tag 或 dispatch。
+本地发布入口保留各自的发布检查：Server 使用 Cargo fmt、Clippy 和 tests；Web 使用 install、typecheck、lint、test、build。检查失败时不提交或推送发布标签。
+
+Action 仓库必须干净，且 HEAD 等于已发布的 `origin/main`。本地发布器只检查所选源码仓库和 Action 仓库的状态，要求源码分支不落后于 origin。`DRY_RUN=true` 仍会读取 Git 状态和 fetch 仓库信息，但不执行检查、版本修改、提交、push、tag 或触发 workflow。
+
+首次启用标签发布前，先将本次 workflow 和 Make 变更提交、推送到 Action `main`，再执行发布命令。
 
 ## GitHub 配置
 
 | 位置 | 名称 | 用途 |
 | --- | --- | --- |
-| Environment `prod` secret（也可用 Repository secret） | `GH_TOKEN` | checkout 所选的私有源码仓库；应有 `ipbot-server` / `ipbot-web` 的只读权限 |
+| Environment `prod` secret（也可用 Repository secret） | `GH_TOKEN` | checkout 所选的私有源码仓库；应有 `ipbot-server` / `ipbot-web` 的 Contents read 权限，仅供 CI 使用 |
 | Environment `prod` secret | `DEPLOY_HOST` | 直连源站的服务器 IP 或域名，不使用 Cloudflare 代理地址 |
 | Environment `prod` secret | `DEPLOY_USER` | SSH 登录用户名 |
 | Environment `prod` secrets | `DEPLOY_SSH_KEY`、`DEPLOY_KNOWN_HOSTS` | Server 部署私钥和已确认的 host key |
@@ -47,11 +51,11 @@ Web、Server 构建和 Server 部署统一使用 GitHub Environment `prod`。Pag
 
 账户 ID 和 token 没有默认值；workflow 不查找或猜测账户，也不创建项目、修改 DNS、自定义域名或证书。先在正确账户建立 Direct Upload 项目并上传前端，准备 API 域名、TLS 与后端允许的前端 Origin；正式切换时协调 API 发布与 Pages 接管 `ipbot.net`。新 Server 不再托管旧主站，若需要过渡，可临时挂载现有 Web 目录并显式设置 `WEB_DIST_DIR`，切换完成后再使用 API-only Compose。前端生产构建使用 `VITE_API_BASE_URL=https://api.ipbot.net/api`。
 
-默认 workflow 权限为 `contents: read`，仅 Server 的 Release job 使用 `contents: write`。Web 使用 Wrangler CLI 直接上传，不向 GitHub Deployment API 写入，不要求 `deployments: write`。Server 与 Web 使用独立 concurrency group，互不等待对方的构建或发布。
+默认 workflow 权限为 `contents: read`，仅 Server 的 Release job 使用 `contents: write`，通过 GitHub 自动提供的 `GITHUB_TOKEN` 向本 Action 仓库发布 Release。Web 使用 Wrangler CLI 直接上传，不向 GitHub Deployment API 写入，不要求 `deployments: write`。Server 与 Web 使用独立 concurrency group，互不等待对方的构建或发布。
 
-本机 dispatch 使用 `GH_TOKEN`、`gh auth token` 或 Git HTTPS credential helper，需要 Action 仓库的 Actions write 权限；它可以与 checkout 私有源码的 token 分开配置。公开仓库的 workflow 日志和 Server Release 产物均公开，不能将业务环境文件、凭据或数据库内容放入产物。
+本机发布只通过各仓库 `origin` 的 SSH 认证推送源码和 Action 标签，需要所选源码仓库与 Action 仓库的推送权限，不使用本地 API Token、`gh` 登录凭据或 Git HTTPS credential helper。CI 的 `GH_TOKEN`、服务器 SSH 和 Cloudflare Secrets 仍保存在 GitHub。公开仓库的 workflow 日志和 Server Release 产物均公开，不能将业务环境文件、凭据或数据库内容放入产物。
 
-参考：[Cloudflare Direct Upload CI](https://developers.cloudflare.com/pages/how-to/use-direct-upload-with-continuous-integration/)、[Wrangler Pages 命令](https://developers.cloudflare.com/workers/wrangler/commands/pages/)、[GitHub workflow dispatch](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event)。
+参考：[Cloudflare Direct Upload CI](https://developers.cloudflare.com/pages/how-to/use-direct-upload-with-continuous-integration/)、[Wrangler Pages 命令](https://developers.cloudflare.com/workers/wrangler/commands/pages/)、[GitHub 标签推送触发](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#push)。
 
 ## Server 产物与部署
 
@@ -86,4 +90,10 @@ make publish-server DEPLOY_VERSION=<version> DEPLOY_CHECKSUM=<trusted-sha256>
 
 SSH 别名 `DEPLOY_HOST` 默认 `ipbot`，可覆盖为已配置的 SSH 主机；`DEPLOY_DIR` 默认 `/opt/one-ip`，HTTP 端口 `DEPLOY_PORT` 默认 `27528`，Compose 项目和容器名 `DEPLOY_NAME` 默认 `one-ip`。`DRY_RUN=true` 只打印计划，不连接服务器。执行器不覆盖远端 `.env` 或根目录旧 Compose，仍执行 Release 校验、部署锁、健康检查和失败回滚。
 
-若源码已推送而 dispatch 失败，可手动重试 `One IP Deploy`，填写所选 target 的源码 SHA、版本和当前 Action SHA。Server Release 和远端版本目录不覆盖，重新构建使用新版本；Pages 的历史部署与回滚由对应 Pages 项目管理。
+若源码已推送而 Action 标签推送失败，直接重试推送本地已创建的 Action 标签，无需重新升级版本：
+
+```sh
+git push origin refs/tags/deploy-server-<version>  # Web 使用 deploy-web-<version>
+```
+
+workflow 已触发但执行失败时，在 GitHub Actions 中重新运行失败的 jobs。Server Release 和远端版本目录不覆盖；Pages 的历史部署与回滚由对应 Pages 项目管理。

@@ -1,12 +1,13 @@
 .PHONY: deploy deploy-server deploy-web
 deploy: deploy-server ## Release only Server through ipbot-action
-deploy-server: ## Check, bump, push and dispatch only the Server workflow
+deploy-server: ## Check, bump and push the Server release tag
 	@$(call ip_release,server)
-deploy-web: ## Check, bump, push and dispatch Web to Cloudflare Pages
+deploy-web: ## Check, bump and push the Web release tag for Cloudflare Pages
 	@$(call ip_release,web)
 
 define ip_release
 set -Eeuo pipefail; \
+unset GH_TOKEN GITHUB_TOKEN; \
 target='$(1)'; version='$(VERSION)'; \
 action_dir='$(abspath $(ACTION_DIR))'; backend_dir='$(abspath $(BACKEND_DIR))'; web_dir='$(abspath $(WEB_DIR))'; \
 action_repository=oldbaby5566/ipbot-action; pnpm='$(PNPM)'; dry_run='$(DRY_RUN)'; \
@@ -46,21 +47,13 @@ read -r action_branch action_head < <(repository_state Action "$$action_dir"); \
 [[ "$$action_branch" == main && "$$action_head" == "$$(git -C "$$action_dir" rev-parse origin/main)" ]] || \
     die 'Action must exactly match published origin/main; commit and push ../action first'; \
 require_new_tag "$$source_label" "$$source_dir" "$$source_tag"; \
+require_new_tag Action "$$action_dir" "$$deploy_tag"; \
 printf '%s\n' 'IPBot release plan:' \
     "  target:   $$target" "  version:  $$version" "  source:   $$source_label $$source_branch@$$source_head" \
-    "  action:   $$action_repository@$$action_head" "  trigger:  workflow_dispatch deploy.yml (source tag $$source_tag)"; \
+    "  action:   $$action_repository@$$action_head" "  trigger:  Action tag $$deploy_tag (source tag $$source_tag)"; \
 if [[ "$$dry_run" == true ]]; then \
     echo 'DRY_RUN=true: no checks, version commits, pushes or tags.'; exit 0; \
 fi; \
-token=$${GH_TOKEN:-}; \
-if [[ -z "$$token" ]] && command -v gh >/dev/null 2>&1; then \
-    token=$$(env -u GH_TOKEN -u GITHUB_TOKEN gh auth token 2>/dev/null || true); \
-fi; \
-if [[ -z "$$token" ]]; then \
-    token=$$(printf 'protocol=https\nhost=github.com\n\n' | \
-        GIT_TERMINAL_PROMPT=0 git credential fill 2>/dev/null | sed -n 's/^password=//p') || true; \
-fi; \
-[[ "$$token" =~ ^[A-Za-z0-9_]{20,255}$$ ]] || die 'Set GH_TOKEN with Actions write access to ipbot-action'; \
 echo "==> Checking $$source_label"; \
 if [[ "$$target" == server ]]; then \
     cargo fmt --all --check; \
@@ -103,22 +96,11 @@ git -C "$$source_dir" push origin "HEAD:refs/heads/$$source_branch" "refs/tags/$
 backend_ref=; web_ref=; \
 if [[ "$$target" == server ]]; then backend_ref=$$(git -C "$$backend_dir" rev-parse HEAD); \
 else web_ref=$$(git -C "$$web_dir" rev-parse HEAD); fi; \
-payload_file=$$(mktemp); response_file=$$(mktemp); \
-trap 'rm -f "$$payload_file" "$$response_file"' EXIT; \
-node -e 'const fs = require("node:fs"); const [file, target, version, backend_ref, web_ref, expected_action_sha] = process.argv.slice(1); fs.writeFileSync(file, JSON.stringify({ref: "main", inputs: {target, version, backend_ref, web_ref, expected_action_sha}}));' \
-    "$$payload_file" "$$target" "$$version" "$$backend_ref" "$$web_ref" "$$action_head"; \
-status=$$(curl --disable --config - --silent --show-error --connect-timeout 15 --max-time 60 \
-    --output "$$response_file" --write-out '%{http_code}' \
-    --header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2026-03-10' \
-    --data-binary "@$$payload_file" \
-    "https://api.github.com/repos/$$action_repository/actions/workflows/deploy.yml/dispatches" \
-    <<<"header = \"Authorization: Bearer $$token\"") || { \
-    unset token; die 'Sources published, but Action dispatch request failed; retry dispatch with the published source SHAs'; \
-}; \
-unset token; \
-if [[ "$$status" != 200 && "$$status" != 204 ]]; then \
-    cat "$$response_file" >&2; \
-    die "Sources published, but Action dispatch failed (HTTP $$status); retry dispatch with the published source SHAs"; \
+metadata=$$(printf '{"target":"%s","version":"%s","backend_ref":"%s","web_ref":"%s","expected_action_sha":"%s"}' \
+    "$$target" "$$version" "$$backend_ref" "$$web_ref" "$$action_head"); \
+git -C "$$action_dir" tag --annotate "$$deploy_tag" "$$action_head" --message "$$metadata"; \
+if ! git -C "$$action_dir" push origin "refs/tags/$$deploy_tag"; then \
+    die "Sources published, but Action release tag push failed; retry: git -C '$$action_dir' push origin refs/tags/$$deploy_tag"; \
 fi; \
 printf 'Triggered IPBot %s deployment %s → https://github.com/oldbaby5566/ipbot-action/actions\n' "$$target" "$$version"
 endef

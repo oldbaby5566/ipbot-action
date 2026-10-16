@@ -15,7 +15,7 @@ def git(directory, *args):
 
 
 class ReleaseContracts(unittest.TestCase):
-    def fixture(self, directory, *, target="server", fail="", dry_run=False, dispatch_status="204"):
+    def fixture(self, directory, *, target="server", fail="", dry_run=False, reject_release_tag=False):
         base = Path(directory)
         repos = {}
         initial = {}
@@ -46,6 +46,17 @@ class ReleaseContracts(unittest.TestCase):
             repos[name] = repo
             initial[name] = git(repo, "rev-parse", "HEAD")
 
+        if reject_release_tag:
+            hook = base / "action.git" / "hooks" / "pre-receive"
+            hook.write_text('''#!/bin/sh
+while read old new ref; do
+    case "$ref" in
+        refs/tags/*) echo 'release tag fixture rejected' >&2; exit 1 ;;
+    esac
+done
+''')
+            hook.chmod(0o755)
+
         binaries = base / "bin"
         binaries.mkdir()
         gate = '''#!/usr/bin/env python3
@@ -53,88 +64,91 @@ import os, pathlib, sys
 base=pathlib.Path(os.environ["FIXTURE_BASE"])
 tool=pathlib.Path(sys.argv[0]).name
 args=sys.argv[1:]
-if tool == "curl":
-    assert "Authorization: Bearer " in sys.stdin.read()
-    payload=pathlib.Path(args[args.index("--data-binary")+1][1:]).read_text()
-    (base/"dispatch.json").write_text(payload)
-    pathlib.Path(args[args.index("--output")+1]).write_text('{"message":"dispatch fixture"}')
-    print(os.environ["DISPATCH_STATUS"], end="")
-    sys.exit(0)
+assert "GH_TOKEN" not in os.environ and "GITHUB_TOKEN" not in os.environ
 gate=args[-1] if tool == "pnpm" else args[0]
 with (base/"gates.log").open("a") as out: out.write(tool+":"+gate+"\\n")
 if os.environ["FAIL_GATE"] == tool: sys.exit(23)
 '''
-        for name in ("pnpm", "cargo", "curl"):
+        for name in ("pnpm", "cargo"):
             (binaries / name).write_text(gate)
             (binaries / name).chmod(0o755)
         env = dict(os.environ, PATH=str(binaries) + os.pathsep + os.environ["PATH"],
                    FIXTURE_BASE=str(base), FAIL_GATE=fail,
-                   GH_TOKEN="fixture_token_not_a_credential", VERSION="1.2.3",
+                   GH_TOKEN="fixture_token_not_a_credential",
+                   GITHUB_TOKEN="fixture_token_not_a_credential", VERSION="1.2.3",
                    BACKEND_DIR=str(repos["backend"]),
                    WEB_DIR=str(repos["web"]), ACTION_DIR=str(repos["action"]),
-                   DRY_RUN=str(dry_run).lower(), DISPATCH_STATUS=dispatch_status)
+                   DRY_RUN=str(dry_run).lower())
         result = subprocess.run(["make", "--no-print-directory", f"deploy-{target}"],
                                 cwd=ROOT, env=env, capture_output=True, text=True)
         return repos, initial, result
 
-    def test_server_checks_publish_only_backend_sha_then_dispatch(self):
+    def test_server_checks_publish_only_backend_sha_then_action_release_tag(self):
         with tempfile.TemporaryDirectory() as directory:
             repos, initial, result = self.fixture(directory)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            payload = json.loads((Path(directory) / "dispatch.json").read_text())
-            self.assertEqual(payload["ref"], "main")
-            self.assertEqual(payload["inputs"], dict(
+            release_tag = "deploy-server-1.2.3"
+            payload = json.loads(git(repos["action"], "for-each-ref", "--format=%(contents)", f"refs/tags/{release_tag}"))
+            self.assertEqual(payload, dict(
                 target="server", version="1.2.3", expected_action_sha=initial["action"],
                 backend_ref=git(repos["backend"], "rev-parse", "HEAD"),
                 web_ref=""))
+            self.assertEqual(git(repos["action"], "cat-file", "-t", release_tag), "tag")
+            self.assertEqual(git(repos["action"], "rev-parse", f"{release_tag}^{{}}"), initial["action"])
+            self.assertEqual(git(Path(directory) / "action.git", "rev-parse", release_tag), git(repos["action"], "rev-parse", release_tag))
             for name in ("backend", "web"):
                 self.assertEqual(git(repos[name], "status", "--porcelain"), "")
                 self.assertEqual(git(repos[name], "rev-parse", "HEAD"), git(repos[name], "rev-parse", "origin/main"))
             self.assertIn('version = "1.2.3"', (repos["backend"] / "Cargo.lock").read_text())
-            self.assertEqual(git(repos["backend"], "rev-parse", "deploy-server-1.2.3"), payload["inputs"]["backend_ref"])
+            self.assertEqual(git(repos["backend"], "rev-parse", "deploy-server-1.2.3"), payload["backend_ref"])
             self.assertEqual(git(repos["web"], "rev-parse", "HEAD"), initial["web"])
             self.assertEqual(git(repos["web"], "tag"), "")
             self.assertNotIn("pnpm:", (Path(directory) / "gates.log").read_text())
 
-    def test_each_failed_check_blocks_versions_tags_and_dispatch(self):
+    def test_each_failed_check_blocks_versions_and_release_tags(self):
         for target, tool in (("web", "pnpm"), ("server", "cargo")):
             with self.subTest(target=target, tool=tool), tempfile.TemporaryDirectory() as directory:
                 repos, initial, result = self.fixture(directory, target=target, fail=tool)
                 self.assertNotEqual(result.returncode, 0)
-                self.assertFalse((Path(directory) / "dispatch.json").exists())
-                for name in ("backend", "web"):
+                for name in repos:
                     self.assertEqual(git(repos[name], "rev-parse", "HEAD"), initial[name])
                     self.assertEqual(git(repos[name], "status", "--porcelain"), "")
                     self.assertEqual(git(repos[name], "tag"), "")
 
     def test_web_release_preserves_backend_version_and_skips_cargo(self):
         with tempfile.TemporaryDirectory() as directory:
-            repos, initial, result = self.fixture(directory, target="web", dispatch_status="200")
+            repos, initial, result = self.fixture(directory, target="web")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(git(repos["backend"], "rev-parse", "HEAD"), initial["backend"])
             self.assertNotIn("cargo:", (Path(directory) / "gates.log").read_text())
-            inputs = json.loads((Path(directory) / "dispatch.json").read_text())["inputs"]
+            release_tag = "deploy-web-1.2.3"
+            inputs = json.loads(git(repos["action"], "for-each-ref", "--format=%(contents)", f"refs/tags/{release_tag}"))
             self.assertEqual(inputs["target"], "web")
             self.assertEqual(inputs["backend_ref"], "")
             self.assertEqual(inputs["web_ref"], git(repos["web"], "rev-parse", "v1.2.3"))
+            self.assertEqual(inputs["expected_action_sha"], initial["action"])
+            self.assertEqual(git(Path(directory) / "action.git", "rev-parse", release_tag), git(repos["action"], "rev-parse", release_tag))
             self.assertEqual(git(repos["backend"], "tag"), "")
 
-    def test_dry_run_has_no_checks_commits_or_dispatch(self):
+    def test_dry_run_has_no_checks_commits_or_release_tags(self):
         with tempfile.TemporaryDirectory() as directory:
             repos, initial, result = self.fixture(directory, dry_run=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertFalse((Path(directory) / "gates.log").exists())
-            self.assertFalse((Path(directory) / "dispatch.json").exists())
             for name in repos:
                 self.assertEqual(git(repos[name], "rev-parse", "HEAD"), initial[name])
+                self.assertEqual(git(repos[name], "tag"), "")
 
-    def test_dispatch_failure_reports_published_sources_and_original_error(self):
+    def test_action_tag_push_failure_reports_published_sources_and_original_error(self):
         with tempfile.TemporaryDirectory() as directory:
-            repos, initial, result = self.fixture(directory, target="web", dispatch_status="403")
+            repos, initial, result = self.fixture(directory, target="web", reject_release_tag=True)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("Sources published, but Action dispatch failed (HTTP 403)", result.stderr)
-            self.assertIn('"message":"dispatch fixture"', result.stderr)
+            self.assertIn("Sources published, but Action release tag push failed", result.stderr)
+            self.assertIn("release tag fixture rejected", result.stderr)
             self.assertNotEqual(git(repos["web"], "rev-parse", "HEAD"), initial["web"])
+            self.assertEqual(git(Path(directory) / "web.git", "rev-parse", "main"), git(repos["web"], "rev-parse", "HEAD"))
+            self.assertEqual(git(Path(directory) / "web.git", "rev-parse", "v1.2.3"), git(repos["web"], "rev-parse", "HEAD"))
+            self.assertEqual(git(repos["action"], "ls-remote", "--tags", "origin", "refs/tags/deploy-web-1.2.3"), "")
 
 
 if __name__ == "__main__":
