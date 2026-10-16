@@ -63,8 +63,6 @@ Server job 只 checkout Action 和 Backend。在 Bookworm 容器编译 Rust，�
 
 公开 Release `deploy-server-<version>` 只包含 `server-image.tar.gz`、`docker-compose.yml` 和 `checksums.txt`。SSH 仅传部署指令及清单 SHA256；服务器从 Release 下载，校验清单与全部产物后加载镜像、执行 Compose、检查回环 `/readyz`，成功后切换 `deployments/current`。失败时先输出容器状态和最近 100 行日志，再沿用之前的 manifest、release.env 和镜像 ID 恢复 Server；失败与历史版本目录保留用于排查，不自动覆盖。
 
-新镜像通过 `net.ipbot.schema-upgrade=site-results-v1` 标记支持保留数据的 `upgrade` 命令。部署先在候选镜像的一次性容器中补充 `ipbot_egress_snapshots.site_results` 并检查结构，成功后才替换服务容器；升级失败时现有服务继续运行。该升级只增加可空字段及 JSON 数组约束，旧镜像可以继续使用升级后的数据库；没有此标记的历史镜像跳过此步骤。发布前仍应按数据库备份流程保存现有数据。
-
 Server 不提取 Web、不切换 `web/current`，也不检查首页或 Web revision。Compose 不再挂载 `./web`，并显式设置 `WEB_DIST_DIR: ""`，覆盖旧 `.env` 里的静态目录值。旧 Web 目录不由发布脚本删除。API 只绑定回环 HTTP 端口，由 Nginx 的 `api.ipbot.net` 入口转发；`APP_PUBLIC_URL` 仍表示受信任的前端 Origin `https://ipbot.net`，不是 API 域名。
 
 服务器保留 `/opt/one-ip/.env`、`data` 和数据库网络，需 Linux、Bash、curl、GNU coreutils、Docker Compose v2。首次发布前准备可由 uid/gid 10001 写入的 `data` 目录、PostgreSQL／Redis 配置与现有数据库网络；本发布器不创建数据库、网络、DNS 或 TLS。基础清单不开放额外探针端口，DNS／STUN 使用独立的 `docker-compose.probes.yml`。

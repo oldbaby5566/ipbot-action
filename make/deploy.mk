@@ -68,6 +68,9 @@ cleanup() {
     trap - EXIT
     [ "$$locked" -eq 1 ] || exit "$$code"
     if [ "$$code" -ne 0 ] && [ "$$started" -eq 1 ]; then
+        echo 'Server deployment failed; collecting container diagnostics before rollback' >&2
+        compose ps --all ip >&2 || true
+        compose logs --no-color --tail 100 ip >&2 || true
         if [ -n "$$old_manifest" ]; then
             if [ -n "$$old_image" ]; then
                 DOCKER_IMAGE="$$old_image" old_compose up -d --no-deps --pull never ip || echo 'Server rollback failed; manual recovery required' >&2
