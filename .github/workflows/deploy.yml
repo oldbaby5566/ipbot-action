@@ -173,7 +173,6 @@ jobs:
           path: |
             .cache/cargo
             .cache/target
-            .cache/fonts
           key: ipbot-server-amd64-${{ hashFiles('backend/Cargo.lock', 'backend/rust-toolchain.toml') }}-${{ needs.prepare.outputs.backend_ref }}
           restore-keys: |
             ipbot-server-amd64-${{ hashFiles('backend/Cargo.lock', 'backend/rust-toolchain.toml') }}-

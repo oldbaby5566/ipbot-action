@@ -6,7 +6,6 @@ RUN apt-get update \
     && useradd --system --uid 10001 --gid one-ip --home-dir /opt/one-ip one-ip
 WORKDIR /opt/one-ip
 COPY one-ip-backend /usr/local/bin/one-ip-backend
-COPY fonts ./fonts
 RUN install -d -o one-ip -g one-ip /opt/one-ip/data
 ENV ENV=prod BIND_ADDR=0.0.0.0:27528 DATA_DIR=/opt/one-ip/data
 EXPOSE 27528 5353/udp 5353/tcp 3478/udp
