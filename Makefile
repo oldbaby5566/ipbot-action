@@ -5,6 +5,7 @@ ACTION_DIR ?= $(PROJECT_ROOT)
 BACKEND_DIR ?= ../backend
 WEB_DIR ?= ../web
 PNPM ?= pnpm
+SKIP_TEST_DB ?= false
 DEPLOY_HOST ?= ipbot
 VERSION ?= $(shell TZ=Asia/Shanghai date +%y.%-m%d.%H%M | awk -F. '{printf "%d.%d.%d", $$1, $$2, $$3}')
 

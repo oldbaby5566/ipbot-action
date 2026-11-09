@@ -11,7 +11,7 @@ set -Eeuo pipefail; \
 unset GH_TOKEN GITHUB_TOKEN; \
 target='$(1)'; version='$(VERSION)'; \
 action_dir='$(abspath $(ACTION_DIR))'; backend_dir='$(abspath $(BACKEND_DIR))'; web_dir='$(abspath $(WEB_DIR))'; \
-action_repository=oldbaby5566/ipbot-action; pnpm='$(PNPM)'; dry_run='$(DRY_RUN)'; \
+action_repository=oldbaby5566/ipbot-action; pnpm='$(PNPM)'; dry_run='$(DRY_RUN)'; skip_test_db='$(SKIP_TEST_DB)'; \
 die() { printf '%s\n' "$$*" >&2; exit 1; }; \
 [[ "$$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$$ ]] || \
     die "VERSION must be three numeric components without leading zeroes, got: $${version:-<empty>}"; \
@@ -19,6 +19,10 @@ case "$$dry_run" in true|false) ;; *) die 'DRY_RUN must be true or false' ;; esa
 deploy_tag="deploy-$$target-$$version"; \
 use_backend=false; use_web=false; \
 case "$$target" in server) use_backend=true ;; web) use_web=true ;; all) use_backend=true; use_web=true ;; esac; \
+case "$$skip_test_db" in true|false) ;; *) die 'SKIP_TEST_DB must be true or false' ;; esac; \
+if [[ "$$use_backend" == true && "$$skip_test_db" == false && -z "$${IP_TEST_DB_URL:-}" ]]; then \
+    die 'Server releases run PostgreSQL tests: set IP_TEST_DB_URL to an isolated test server (role needs CREATEDB), or SKIP_TEST_DB=true'; \
+fi; \
 backend_tag="deploy-server-$$version"; web_tag="v$$version"; \
 if [[ "$$use_backend" == true ]]; then backend_dir=$$(cd -- "$$backend_dir" && pwd); fi; \
 if [[ "$$use_web" == true ]]; then web_dir=$$(cd -- "$$web_dir" && pwd); fi; \
@@ -69,6 +73,12 @@ if [[ "$$use_backend" == true ]]; then \
         && cargo fmt --all --check \
         && cargo clippy --all-targets --locked -- -D warnings \
         && cargo test --locked); \
+    if [[ "$$skip_test_db" == true ]]; then \
+        echo 'SKIP_TEST_DB=true: PostgreSQL tests skipped' >&2; \
+    else \
+        echo '==> Checking Backend PostgreSQL'; \
+        $(MAKE) --no-print-directory -C "$$backend_dir" test-db; \
+    fi; \
 fi; \
 if [[ "$$use_web" == true ]]; then \
     echo '==> Checking Web'; \

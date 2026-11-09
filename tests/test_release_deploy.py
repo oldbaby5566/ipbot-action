@@ -15,7 +15,8 @@ def git(directory, *args):
 
 
 class ReleaseContracts(unittest.TestCase):
-    def fixture(self, directory, *, target="server", fail="", dry_run=False, reject_release_tag=False):
+    def fixture(self, directory, *, target="server", fail="", dry_run=False, reject_release_tag=False,
+                test_db_url="postgres://fixture.invalid/test", skip_test_db=None):
         base = Path(directory)
         repos = {}
         initial = {}
@@ -23,6 +24,7 @@ class ReleaseContracts(unittest.TestCase):
             "backend": {
                 "Cargo.toml": '[package]\nname = "one-ip-backend"\nversion = "1.0.0"\n',
                 "Cargo.lock": '[[package]]\nname = "one-ip-backend"\nversion = "1.0.0"\n',
+                "Makefile": "test-db:\n\tcargo test-db\n",
             },
             "web": {"package.json": '{"name":"fixture","version":"1.0.0"}\n'},
             "action": {"README.md": "Action fixture\n"},
@@ -79,6 +81,12 @@ if os.environ["FAIL_GATE"] == tool: sys.exit(23)
                    BACKEND_DIR=str(repos["backend"]),
                    WEB_DIR=str(repos["web"]), ACTION_DIR=str(repos["action"]),
                    DRY_RUN=str(dry_run).lower())
+        env.pop("IP_TEST_DB_URL", None)
+        env.pop("SKIP_TEST_DB", None)
+        if test_db_url:
+            env["IP_TEST_DB_URL"] = test_db_url
+        if skip_test_db is not None:
+            env["SKIP_TEST_DB"] = skip_test_db
         make_target = "deploy" if target == "all" else f"deploy-{target}"
         result = subprocess.run(["make", "--no-print-directory", make_target],
                                 cwd=ROOT, env=env, capture_output=True, text=True)
@@ -136,6 +144,37 @@ if os.environ["FAIL_GATE"] == tool: sys.exit(23)
                     self.assertEqual(git(repos[name], "rev-parse", "HEAD"), initial[name])
                     self.assertEqual(git(repos[name], "status", "--porcelain"), "")
                     self.assertEqual(git(repos[name], "tag"), "")
+
+    def test_server_release_runs_postgresql_tests(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, _, result = self.fixture(directory)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("cargo:test-db", (Path(directory) / "gates.log").read_text())
+
+    def test_server_release_without_test_database_stops_before_any_change(self):
+        for target in ("server", "all"):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as directory:
+                repos, initial, result = self.fixture(directory, target=target, test_db_url="")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("IP_TEST_DB_URL", result.stderr)
+                self.assertFalse((Path(directory) / "gates.log").exists())
+                for name in repos:
+                    self.assertEqual(git(repos[name], "rev-parse", "HEAD"), initial[name])
+                    self.assertEqual(git(repos[name], "tag"), "")
+
+    def test_skip_test_db_releases_without_postgresql_tests(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, _, result = self.fixture(directory, test_db_url="", skip_test_db="true")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("PostgreSQL tests skipped", result.stderr)
+            gates = (Path(directory) / "gates.log").read_text()
+            self.assertIn("cargo:test", gates)
+            self.assertNotIn("cargo:test-db", gates)
+
+    def test_web_release_needs_no_test_database(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, _, result = self.fixture(directory, target="web", test_db_url="")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_web_release_preserves_backend_version_and_skips_cargo(self):
         with tempfile.TemporaryDirectory() as directory:
