@@ -35,7 +35,7 @@ Action 标签指向已发布的 Action `main` HEAD，annotation 为包含 `targe
 
 本地发布入口保留各自的发布检查：Server 使用 Cargo fmt、Clippy、tests 和 Backend `make test-db`（PostgreSQL 回归）；Web 使用 install、typecheck、lint、test、build。检查失败时不提交或推送发布标签。
 
-Server 与全量发布需要 `IP_TEST_DB_URL` 指向隔离的测试 PostgreSQL（角色需 CREATEDB，每个测试独立建库），未设置时在任何检查与 Git 操作前退出。确实无法连接测试库时显式加 `SKIP_TEST_DB=true` 跳过，发布器会打印提示。Web 发布不需要。
+Server 与全量发布需要本机 PostgreSQL 在运行：默认使用 Backend `.env.dev` 的本机 `DB_URL`（角色需 CREATEDB，每个测试独立建库，不动开发数据），也可用 `IP_TEST_DB_URL` 指定。两者都没有时在任何检查与 Git 操作前退出。确实无法连接测试库时显式加 `SKIP_TEST_DB=true` 跳过，发布器会打印提示。Web 发布不需要。
 
 Action 仓库必须干净，且 HEAD 等于已发布的 `origin/main`。本地发布器只检查所选源码仓库和 Action 仓库的状态，要求源码分支不落后于 origin。`DRY_RUN=true` 仍会读取 Git 状态和 fetch 仓库信息，但不执行检查、版本修改、提交、push、tag 或触发 workflow。
 
