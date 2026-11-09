@@ -20,8 +20,8 @@ deploy_tag="deploy-$$target-$$version"; \
 use_backend=false; use_web=false; \
 case "$$target" in server) use_backend=true ;; web) use_web=true ;; all) use_backend=true; use_web=true ;; esac; \
 case "$$skip_test_db" in true|false) ;; *) die 'SKIP_TEST_DB must be true or false' ;; esac; \
-if [[ "$$use_backend" == true && "$$skip_test_db" == false && -z "$${IP_TEST_DB_URL:-}" ]]; then \
-    die 'Server releases run PostgreSQL tests: set IP_TEST_DB_URL to an isolated test server (role needs CREATEDB), or SKIP_TEST_DB=true'; \
+if [[ "$$use_backend" == true && "$$skip_test_db" == false && -z "$${IP_TEST_DB_URL:-}" && ! -f "$$backend_dir/.env.dev" ]]; then \
+    die 'Server releases run PostgreSQL tests: set IP_TEST_DB_URL, keep a local DB_URL in Backend .env.dev (role needs CREATEDB), or SKIP_TEST_DB=true'; \
 fi; \
 backend_tag="deploy-server-$$version"; web_tag="v$$version"; \
 if [[ "$$use_backend" == true ]]; then backend_dir=$$(cd -- "$$backend_dir" && pwd); fi; \
