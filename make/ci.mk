@@ -18,7 +18,8 @@ build-server: ## Build and package the Server release on the Action runner
 	docker build --platform linux/amd64 --pull --file '$(PROJECT_ROOT)/deploy/Dockerfile' \
 	  --tag "one-ip:$$VERSION" dist/image; \
 	docker save "one-ip:$$VERSION" | gzip -1 > dist/server-image.tar.gz; \
-	cp backend/deploy/docker/docker-compose.yml dist/docker-compose.yml
+	cp backend/deploy/docker/docker-compose.yml dist/docker-compose.yml; \
+	cp backend/deploy/nginx/nginx.conf dist/nginx.conf
 
 configure-ssh: export DEPLOY_PORT := $(if $(filter file undefined,$(origin DEPLOY_PORT)),22,$(DEPLOY_PORT))
 configure-ssh: ## Configure the Action runner's deployment SSH identity

@@ -188,6 +188,7 @@ jobs:
           path: |
             dist/server-image.tar.gz
             dist/docker-compose.yml
+            dist/nginx.conf
           if-no-files-found: error
           compression-level: 0
           retention-days: 2
@@ -219,7 +220,7 @@ jobs:
           BACKEND_SHA: ${{ needs.prepare.outputs.backend_ref }}
         run: |
           set -euo pipefail
-          assets=(server-image.tar.gz docker-compose.yml)
+          assets=(server-image.tar.gz docker-compose.yml nginx.conf)
           sha256sum "${assets[@]}" > checksums.txt
           printf 'checksum=%s\n' "$(sha256sum checksums.txt | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
           printf 'Server: %s\nAction: %s\n' "$BACKEND_SHA" "$ACTION_SHA" > release.txt

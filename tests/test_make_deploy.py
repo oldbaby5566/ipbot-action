@@ -64,7 +64,8 @@ class DeploymentContracts(unittest.TestCase):
             self.assertNotIn("[plan]", result.stdout)
 
     def fixture(self, directory, *, fail=False, initial=False, managed=False,
-                corrupt=False, bad_manifest=False, download_failure=False):
+                corrupt=False, bad_manifest=False, download_failure=False,
+                nginx="release nginx config", nginx_fail=False):
         root = Path(directory) / "service"
         binaries = Path(directory) / "bin"
         old = root / "web/releases/old"
@@ -85,6 +86,12 @@ class DeploymentContracts(unittest.TestCase):
         (assets / "server-image.tar.gz").write_bytes(b"image fixture")
         (assets / "docker-compose.yml").write_text("release compose")
         names = ["server-image.tar.gz", "docker-compose.yml"]
+        if nginx is not None:
+            (assets / "nginx.conf").write_text(nginx)
+            names.append("nginx.conf")
+        site = Path(directory) / "nginx/api.ipbot.net.conf"
+        site.parent.mkdir()
+        site.write_text("old nginx config")
         manifest = "".join(f"{hashlib.sha256((assets / name).read_bytes()).hexdigest()}  {name}\n" for name in names)
         (assets / "checksums.txt").write_text(manifest)
         checksum = hashlib.sha256(manifest.encode()).hexdigest()
@@ -138,9 +145,19 @@ elif args[0] in ('create','cp'): sys.exit('Server must not extract Web from imag
 elif args[0]=="inspect": print("sha256:"+"b"*64)
 elif args[0]=="compose" and args[-3:]==["ps","-q","ip"] and os.environ["INITIAL"]!="true": print("old-container")
 ''')
+        (binaries / "sudo").write_text('#!/bin/sh\n[ "$1" = -n ] && shift\nexec "$@"\n')
+        (binaries / "nginx").write_text('''#!/usr/bin/env python3
+import os, pathlib, sys
+with open(os.environ["NGINX_LOG"], "a") as log: log.write("nginx " + " ".join(sys.argv[1:]) + "\\n")
+if os.environ["NGINX_FAIL"] == "true" and pathlib.Path(os.environ["NGINX_SITE"]).read_text().startswith("release"): sys.exit(1)
+''')
+        (binaries / "systemctl").write_text('''#!/usr/bin/env python3
+import os, sys
+with open(os.environ["NGINX_LOG"], "a") as log: log.write("systemctl " + " ".join(sys.argv[1:]) + "\\n")
+''')
         for path in binaries.iterdir():
             path.chmod(0o755)
-        environment = dict(os.environ, PATH=str(binaries) + os.pathsep + os.environ["PATH"], FAKE_ROOT=str(root), FAIL_HEALTH=str(fail).lower(), INITIAL=str(initial).lower(), DOCKER_LOG=str(Path(directory) / "docker.log"), RELEASE_ASSETS=str(assets), DOWNLOAD_FAILURE=str(download_failure).lower())
+        environment = dict(os.environ, PATH=str(binaries) + os.pathsep + os.environ["PATH"], FAKE_ROOT=str(root), FAIL_HEALTH=str(fail).lower(), INITIAL=str(initial).lower(), DOCKER_LOG=str(Path(directory) / "docker.log"), RELEASE_ASSETS=str(assets), DOWNLOAD_FAILURE=str(download_failure).lower(), NGINX_SITE=str(site), NGINX_FAIL=str(nginx_fail).lower(), NGINX_LOG=str(Path(directory) / "nginx.log"))
         environment.pop("DOCKER_IMAGE", None)
         result = subprocess.run(["bash", "-se", "--", str(root), "v1", "27528", "one-ip", checksum], input=remote_script(), text=True, env=environment, capture_output=True)
         self.assertEqual((root / ".env").read_text(), "DB_URL=fixture-only\nAPP_PUBLIC_URL=https://fixture.example\n")
@@ -208,6 +225,53 @@ elif args[0]=="compose" and args[-3:]==["ps","-q","ip"] and os.environ["INITIAL"
             self.assertIn(str((root / "deployments/old/docker-compose.yml").resolve()), restored["args"])
             self.assertIn(str((root / "deployments/old/release.env").resolve()), restored["args"])
             self.assertEqual((root / "deployments/old/docker-compose.yml").read_text(), "previous compose with original settings")
+
+
+    def nginx_state(self, directory):
+        site = (Path(directory) / "nginx/api.ipbot.net.conf").read_text()
+        log = Path(directory) / "nginx.log"
+        return site, log.read_text().splitlines() if log.exists() else []
+
+    def test_release_installs_changed_nginx_config_after_readiness(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, result, _ = self.fixture(directory, managed=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            site, calls = self.nginx_state(directory)
+            self.assertEqual(site, "release nginx config")
+            self.assertEqual(calls, ["nginx -t", "systemctl reload nginx"])
+            self.assertEqual((root / "deployments/v1/nginx.conf").read_text(), "release nginx config")
+            self.assertEqual((root / "deployments/v1/nginx.previous.conf").read_text(), "old nginx config")
+
+    def test_unchanged_nginx_config_is_not_reloaded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, result, _ = self.fixture(directory, nginx="old nginx config")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.nginx_state(directory), ("old nginx config", []))
+
+    def test_rejected_nginx_config_restores_nginx_and_server(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, result, log = self.fixture(directory, managed=True, nginx_fail=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("nginx rejected the release config", result.stderr)
+            site, calls = self.nginx_state(directory)
+            self.assertEqual(site, "old nginx config")
+            self.assertEqual(calls, ["nginx -t", "nginx -t", "systemctl reload nginx"])
+            self.assertEqual(os.readlink(root / "deployments/current"), "old")
+            starts = [json.loads(line) for line in log.read_text().splitlines() if '"up"' in line]
+            self.assertEqual(len(starts), 2)
+
+    def test_failed_readiness_leaves_nginx_untouched(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, result, _ = self.fixture(directory, fail=True, managed=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(self.nginx_state(directory), ("old nginx config", []))
+
+    def test_release_without_nginx_config_still_deploys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, result, _ = self.fixture(directory, nginx=None)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.nginx_state(directory), ("old nginx config", []))
+            self.assertFalse((root / "deployments/v1/nginx.conf").exists())
 
 
 if __name__ == "__main__":

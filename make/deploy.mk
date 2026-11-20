@@ -48,6 +48,14 @@ old_deployment=
 previous_deployment=
 started=0
 deployment_switched=0
+# The API site config ships with each release, so the origin never drifts from the repo.
+nginx_site=$${NGINX_SITE:-/etc/nginx/conf.d/api.ipbot.net.conf}
+nginx_previous=
+nginx_switched=0
+
+as_root() {
+    if [ "$$(id -u)" -eq 0 ]; then "$$@"; else sudo -n "$$@"; fi
+}
 
 release_lock() {
     if [ -f "$$root/.deployment-lock/owner" ] \
@@ -87,6 +95,15 @@ cleanup() {
             compose rm --stop --force ip || echo 'Failed to remove initial deployment container' >&2
         fi
     fi
+    if [ "$$code" -ne 0 ] && [ "$$nginx_switched" -eq 1 ]; then
+        echo 'Restoring the previous nginx config' >&2
+        if [ -n "$$nginx_previous" ]; then
+            as_root install -m 644 "$$nginx_previous" "$$nginx_site" || true
+        else
+            as_root mv -f "$$nginx_site" "$$root/deployments/$$version/nginx.rejected.conf" || true
+        fi
+        { as_root nginx -t && as_root systemctl reload nginx; } || echo 'nginx restore failed; manual recovery required' >&2
+    fi
     if [ "$$code" -ne 0 ] && [ "$$deployment_switched" -eq 1 ]; then
         if [ -n "$$previous_deployment" ]; then
             ln -s "$$previous_deployment" "$$root/deployments/current.next"
@@ -124,8 +141,13 @@ base="https://github.com/oldbaby5566/ipbot-action/releases/download/$$release_ta
 curl --fail --silent --show-error --location --retry 5 --retry-all-errors --connect-timeout 15 --max-time 600 \
     "$$base/checksums.txt" -o "$$incoming/checksums.txt"
 printf '%s  %s\n' "$$checksum" "$$incoming/checksums.txt" | sha256sum --check --strict
+assets="server-image.tar.gz docker-compose.yml"
+# Releases published before nginx.conf shipped still deploy and leave nginx as it is.
+if grep -q '  nginx.conf$$' "$$incoming/checksums.txt"; then
+    assets="$$assets nginx.conf"
+fi
 pids=
-for asset in server-image.tar.gz docker-compose.yml; do
+for asset in $$assets; do
     curl --fail --silent --show-error --location --retry 5 --retry-all-errors --connect-timeout 15 --max-time 600 \
         "$$base/$$asset" -o "$$incoming/$$asset" &
     pids="$$pids $$!"
@@ -159,6 +181,21 @@ for attempt in $$(seq 1 12); do
     sleep 2
 done
 [ "$$ready" -eq 1 ] || { echo 'Server readiness check failed' >&2; exit 1; }
+
+if [ -f "$$incoming/nginx.conf" ]; then
+    cp "$$incoming/nginx.conf" "$$root/deployments/$$version/nginx.conf"
+    if ! cmp -s "$$incoming/nginx.conf" "$$nginx_site"; then
+        if [ -f "$$nginx_site" ]; then
+            nginx_previous="$$root/deployments/$$version/nginx.previous.conf"
+            cp "$$nginx_site" "$$nginx_previous"
+        fi
+        nginx_switched=1
+        as_root install -m 644 "$$incoming/nginx.conf" "$$nginx_site"
+        as_root nginx -t || { echo 'nginx rejected the release config' >&2; exit 1; }
+        as_root systemctl reload nginx
+        echo 'nginx config updated and reloaded'
+    fi
+fi
 
 ln -s "$$version" "$$root/deployments/current.next"
 mv -Tf "$$root/deployments/current.next" "$$root/deployments/current"
